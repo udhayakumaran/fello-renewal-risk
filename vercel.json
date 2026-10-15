@@ -1,0 +1,23 @@
+{
+  "buildCommand": "npm run build",
+  "functions": {
+    "api/cron/nightly.js": {
+      "maxDuration": 60
+    },
+    "api/index.js": {
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/api"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/nightly",
+      "schedule": "30 20 * * *"
+    }
+  ]
+}

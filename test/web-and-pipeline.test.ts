@@ -1,0 +1,111 @@
+import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
+import { after, before, test } from "node:test";
+import pg from "pg";
+import { ownerClient } from "../src/db.js";
+import { makeCookie, buildApp, readCookie } from "../src/web/server.js";
+import { webPool } from "../src/db.js";
+import { runNightly } from "../src/pipeline/nightly.js";
+
+/**
+ * Integration tests against the local stack: web isolation, forged sessions, score traceability,
+ * and the failed-run rule. Skipped when the database settings are missing.
+ */
+const url = process.env["DATABASE_URL"];
+const secret = process.env["SESSION_SECRET"] ?? "";
+const skip = url && secret.length >= 16 ? false : "DATABASE_URL or SESSION_SECRET not set";
+
+let base = "";
+let server: { close: () => void } | null = null;
+let owner: pg.Client;
+
+const cookieFor = (org: string, csm: string): string => `csm_session=${encodeURIComponent(makeCookie({ org, csm }, secret))}`;
+
+async function get(path: string, cookie?: string): Promise<{ status: number; location: string | null; body: string }> {
+  const response = await fetch(base + path, {
+    redirect: "manual",
+    headers: cookie ? { cookie } : {},
+  });
+  return { status: response.status, location: response.headers.get("location"), body: await response.text() };
+}
+
+before(async () => {
+  if (skip) return;
+  owner = ownerClient();
+  await owner.connect();
+  const app = buildApp(webPool(), secret);
+  const listening = app.listen(0);
+  await new Promise<void>((resolve) => listening.once("listening", () => resolve()));
+  const { port } = listening.address() as AddressInfo;
+  base = `http://127.0.0.1:${port}`;
+  server = listening;
+});
+
+after(async () => {
+  if (skip) return;
+  server?.close();
+  await owner.end();
+});
+
+test("no cookie: redirected to sign-in", { skip }, async () => {
+  const response = await get("/");
+  assert.equal(response.status, 302);
+  assert.equal(response.location, "/login");
+});
+
+test("a forged cookie is refused", { skip }, async () => {
+  const forged = makeCookie({ org: "org_a", csm: "org_a-CSM1" }, "a-different-secret-entirely-000");
+  assert.equal(readCookie(forged, secret), null);
+  const response = await get("/", `csm_session=${encodeURIComponent(forged)}`);
+  assert.equal(response.status, 302);
+});
+
+test("a CSM sees only their own accounts, and only from their own org", { skip }, async () => {
+  const response = await get("/", cookieFor("org_a", "org_a-CSM1"));
+  assert.equal(response.status, 200);
+  const ids = [...new Set([...response.body.matchAll(/\/account\/(SF\d+)/g)].map((m) => m[1] ?? ""))];
+  assert.ok(ids.length > 0, "list should show accounts");
+  const rows = (await owner.query("select org_id, owner_csm_id from sf_accounts where sf_id = any($1)", [ids])).rows;
+  for (const r of rows) {
+    assert.equal(r.org_id, "org_a");
+    assert.equal(r.owner_csm_id, "org_a-CSM1");
+  }
+});
+
+test("a session from org_a cannot open an org_b account", { skip }, async () => {
+  const other = await owner.query("select sf_id from sf_accounts where org_id = 'org_b' and owner_csm_id = 'org_b-CSM1' limit 1");
+  const sfId = other.rows[0]?.sf_id as string;
+  const response = await get(`/account/${sfId}`, cookieFor("org_a", "org_a-CSM1"));
+  assert.equal(response.status, 404);
+  assert.ok(!response.body.includes(sfId), "the page must not reveal the account");
+});
+
+test("every stored score can be recomputed from its stored reasons", { skip }, async () => {
+  const published = (await owner.query("select p.run_id, r.model_id from published_runs p join runs r using (run_id) where p.org_id = 'org_a'")).rows[0];
+  const model = (await owner.query("select bias from models where model_id = $1", [published.model_id])).rows[0];
+  const scores = (await owner.query("select probability, reasons from scores where run_id = $1 and probability is not null", [published.run_id])).rows;
+  assert.ok(scores.length > 0);
+  for (const s of scores) {
+    const logit = Number(model.bias) + (s.reasons as { contribution: number }[]).reduce((sum, r) => sum + r.contribution, 0);
+    const recomputed = 1 / (1 + Math.exp(-logit));
+    assert.ok(Math.abs(recomputed - Number(s.probability)) < 1e-3, `score ${s.probability} vs recomputed ${recomputed}`);
+  }
+});
+
+test("a failed run is logged and never published", { skip }, async () => {
+  const before = (await owner.query("select run_id from published_runs where org_id = 'org_c'")).rows[0]?.run_id;
+  const previous = process.env["FORCE_FAIL"];
+  process.env["FORCE_FAIL"] = "org_c";
+  try {
+    const { failures } = await runNightly(process.env["AS_OF"] ?? new Date().toISOString().slice(0, 10));
+    assert.equal(failures, 1);
+  } finally {
+    if (previous === undefined) delete process.env["FORCE_FAIL"];
+    else process.env["FORCE_FAIL"] = previous;
+  }
+  const after = (await owner.query("select run_id from published_runs where org_id = 'org_c'")).rows[0]?.run_id;
+  assert.equal(after, before, "published pointer must not move to a failed run");
+  const failed = (await owner.query("select status, error from runs where org_id = 'org_c' order by started_at desc limit 1")).rows[0];
+  assert.equal(failed?.status, "failed");
+  assert.match(String(failed?.error), /FORCE_FAIL/);
+});

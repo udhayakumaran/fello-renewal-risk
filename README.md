@@ -7,6 +7,12 @@ source records. The list is built nightly by a job that runs without anyone star
 Read `BRIEF.md` first for the problem and the disagreements with the request. This file covers what
 was built, what was decided, what was skipped, and what breaks first.
 
+## Live demo
+
+- App: https://fello-renewal-risk-udhayakumarans-projects.vercel.app (sign-in asks for the demo access code, which is not in this repo)
+- Database: Supabase project `fello-renewal-risk` (Singapore). The nightly run is a Vercel Cron job at 02:00 IST, protected by `CRON_SECRET`.
+- Known gap: the database connection is encrypted but does not yet verify Supabase's certificate (`sslmode=no-verify`). Fix: verify against Supabase's root CA before relying on it outside a demo.
+
 ## Run it
 
 Needs Node 24, Docker, and the Supabase CLI.

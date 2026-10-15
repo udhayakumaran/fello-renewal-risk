@@ -19,5 +19,6 @@
       "path": "/api/cron/nightly",
       "schedule": "30 20 * * *"
     }
-  ]
+  ],
+  "outputDirectory": "public"
 }

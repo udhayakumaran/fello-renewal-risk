@@ -11,8 +11,8 @@ export const LABELS: Record<string, string> = {
   tickets_opened_90d: "Many support tickets in the last 90 days",
   cancel_warning_120d: "Asked to cancel at renewal",
   downgrade_120d: "Plan or seats cut recently",
-  tenure_days: "Short time as a customer",
-  log_contract_value: "Large contract",
+  tenure_days: "Days as a customer",
+  log_contract_value: "Contract value ($)",
   inactive_contact_share: "Some contacts marked inactive",
 };
 

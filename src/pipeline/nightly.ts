@@ -97,7 +97,8 @@ function explain(model: Model, x: number[], sfId: string, org: OrgData, asOf: st
     return {
       feature,
       label: LABELS[feature] ?? feature,
-      value: round(x[j] ?? 0, 2),
+      // The model uses log(contract value); show the dollar amount a CSM recognises.
+      value: feature === "log_contract_value" ? Math.round(Math.exp(x[j] ?? 0)) : round(x[j] ?? 0, 2),
       weight: round(weight, 4),
       contribution: round(weight * z, 4),
       sources: sourceIdsFor(feature, sfId, org.idx, asOf),

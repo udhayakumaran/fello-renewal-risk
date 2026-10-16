@@ -85,6 +85,12 @@ interface Reason {
   sources: { ids: string[]; count: number };
 }
 
+function riskPill(p: number | null): string {
+  if (p === null) return "<span class='muted'>–</span>";
+  const tone = Number(p) >= 0.04 ? "high" : Number(p) >= 0.02 ? "mid" : "low";
+  return `<span class="risk ${tone}">${pct(p)}</span>`;
+}
+
 function topReasons(reasons: Reason[], n: number): string {
   const positive = reasons.filter((r) => r.contribution > 0).slice(0, n);
   if (positive.length === 0) return "<span class='muted'>No warning signs</span>";
@@ -93,28 +99,143 @@ function topReasons(reasons: Reason[], n: number): string {
 
 function page(title: string, body: string, session: Session | null): string {
   const nav = session
-    ? `<nav><a href="/">My renewals</a> · <a href="/runs">Run log</a> · <span class="muted">${esc(session.csm)} (${esc(session.org)})</span>
-       <form method="post" action="/logout" class="inline"><button>Sign out</button></form></nav>`
+    ? `<header class="top">
+        <a class="brand" href="/">Renewal risk</a>
+        <nav>
+          <a href="/">This week</a>
+          <a href="/runs">Run log</a>
+        </nav>
+        <div class="who">
+          <span class="avatar">${esc("C" + (session.csm.split("-").pop() ?? "").replace(/^CSM/, ""))}</span>
+          <span><strong>${esc(session.csm)}</strong><small>${esc(session.org)}</small></span>
+          <form method="post" action="/logout" class="inline"><button class="ghost">Sign out</button></form>
+        </div>
+      </header>`
     : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)}</title>
+<title>${esc(title)} · Renewal risk</title>
 <style>
-:root { --fg:#1c1c1e; --muted:#6b6b70; --line:#e4e4e7; --bg:#fff; --chip:#eef2ff; --warn:#fff7e6; }
-@media (prefers-color-scheme: dark) { :root { --fg:#f2f2f3; --muted:#9a9aa0; --line:#34343a; --bg:#141416; --chip:#26293d; --warn:#2d2513; } }
-body { font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; padding: 16px; }
-nav { margin-bottom: 16px; font-size: 14px; }
-h1 { font-size: 20px; margin: 8px 0; } h2 { font-size: 16px; margin: 24px 0 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--muted); font-weight: 600; }
-.chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 2px 8px; font-size: 12px; margin: 2px 2px 2px 0; }
-.muted { color: var(--muted); } .banner { background: var(--warn); padding: 10px; border-radius: 6px; margin-bottom: 12px; }
-.inline { display: inline; } button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
-a { color: inherit; } .scroll { overflow-x: auto; }
-@media (max-width: 640px) { th:nth-child(4), td:nth-child(4) { display: none; } }
-</style></head><body>${nav}${body}
-<p class="muted" style="font-size:12px;margin-top:32px">Scores are a model's estimate from synthetic test data, not a forecast about real customers.</p>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --fg: #15171c; --muted: #6b7079; --line: #e5e7eb;
+  --accent: #3b4bd8; --accent-soft: #eef0ff; --chip: #f1f3f7; --chip-fg: #353a44;
+  --ok: #0f7b4b; --ok-soft: #e7f6ee; --bad: #b42318; --bad-soft: #fdecea; --warn: #8a5a00; --warn-soft: #fff4dd;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --card: #171a21; --fg: #eceef2; --muted: #9aa1ad; --line: #272b35;
+    --accent: #8d97ff; --accent-soft: #232844; --chip: #232731; --chip-fg: #d6d9e0;
+    --ok: #5fd39a; --ok-soft: #173326; --bad: #ff8a80; --bad-soft: #3a1d1b; --warn: #f2c46d; --warn-soft: #3a2f16;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14.5px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+main { max-width: 1120px; margin: 0 auto; padding: 24px 20px 48px; }
+a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+h1 { font-size: 22px; line-height: 1.25; margin: 0 0 4px; letter-spacing: -.01em; }
+h2 { font-size: 15px; margin: 28px 0 10px; letter-spacing: -.005em; }
+p { margin: 0; }
+.muted { color: var(--muted); } .small { font-size: 12.5px; }
+.lede { color: var(--muted); margin-bottom: 18px; }
+
+/* top bar */
+.top { display: flex; align-items: center; gap: 18px; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+.brand { font-weight: 700; color: var(--fg); letter-spacing: -.01em; margin-right: 8px; }
+.top nav { display: flex; gap: 14px; }
+.top nav a { color: var(--muted); font-weight: 500; } .top nav a:hover { color: var(--fg); text-decoration: none; }
+.who { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.who > span:not(.avatar) { display: flex; flex-direction: column; line-height: 1.2; } .who small { color: var(--muted); font-size: 12px; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+
+/* cards and stats */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 18px 0 6px; }
+.stat { padding: 14px 16px; }
+.stat .label { color: var(--muted); font-size: 12.5px; font-weight: 500; }
+.stat .value { font-size: 24px; font-weight: 700; letter-spacing: -.01em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat .hint { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+/* tables */
+.table-wrap { background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow-x: auto; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 14px; }
+th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; background: var(--card); position: sticky; top: 0; }
+tbody tr:hover td { background: var(--accent-soft); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.date { white-space: nowrap; }
+td.account a { font-weight: 600; color: var(--fg); } td.account a:hover { color: var(--accent); }
+.rank { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--chip); color: var(--chip-fg); font-size: 12px; font-weight: 600; }
+.risk { display: inline-block; min-width: 64px; text-align: center; padding: 3px 9px; border-radius: 999px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.risk.high { background: var(--bad-soft); color: var(--bad); }
+.risk.mid { background: var(--warn-soft); color: var(--warn); }
+.risk.low { background: var(--ok-soft); color: var(--ok); }
+.chip { display: inline-block; background: var(--chip); color: var(--chip-fg); border-radius: 999px; padding: 2px 9px; font-size: 12px; margin: 2px 4px 2px 0; white-space: nowrap; }
+.why-inline { display: none; } .why-inline .chip { font-size: 11.5px; white-space: normal; max-width: 100%; text-align: left; }
+.chip.done { background: var(--ok-soft); color: var(--ok); }
+.status { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.status.succeeded { background: var(--ok-soft); color: var(--ok); }
+.status.failed { background: var(--bad-soft); color: var(--bad); }
+.status.running { background: var(--warn-soft); color: var(--warn); }
+
+/* sections */
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 28px 0 10px; }
+.section-head h2 { margin: 0; }
+.banner { background: var(--warn-soft); color: var(--warn); padding: 10px 14px; border-radius: 10px; margin: 12px 0; }
+.empty { padding: 28px; text-align: center; color: var(--muted); }
+.callout { padding: 14px 16px; background: var(--accent-soft); border-radius: 10px; color: var(--fg); margin: 14px 0; }
+.explain { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+
+/* buttons and forms */
+button, .button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button:hover { filter: brightness(1.05); }
+button.ghost { background: transparent; color: var(--muted); border-color: var(--line); padding: 6px 12px; font-weight: 500; }
+button.ghost:hover { color: var(--fg); filter: none; }
+input, select { font: inherit; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); min-width: 0; }
+input:focus, select:focus, button:focus-visible, a:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; border-color: var(--accent); }
+label { display: block; font-size: 13px; color: var(--muted); font-weight: 500; }
+label > select, label > input { display: block; width: 100%; margin-top: 6px; color: var(--fg); }
+
+/* login */
+.login { min-height: calc(100vh - 80px); display: grid; place-items: center; padding: 20px; }
+.login-card { width: 100%; max-width: 420px; padding: 28px; }
+.login-card h1 { margin-bottom: 6px; } .login-card form { display: grid; gap: 14px; margin-top: 18px; }
+.login-card button { width: 100%; padding: 11px; }
+
+/* account page */
+.account-head { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.check { font-size: 12.5px; color: var(--muted); background: var(--chip); padding: 10px 12px; border-radius: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--chip); padding: 1px 5px; border-radius: 5px; word-break: break-all; }
+.reason-label { font-weight: 600; }
+.bar { height: 6px; background: var(--chip); border-radius: 999px; overflow: hidden; min-width: 60px; }
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.bar.neg > span { background: var(--ok); }
+.footnote { margin-top: 36px; color: var(--muted); font-size: 12px; text-align: center; }
+
+/* phones: keep chance, money and reasons on screen; rank and renewal date live on the account page */
+@media (max-width: 640px) {
+  .hide-sm { display: none; }
+  .why-col { display: none; }
+  .why-inline { display: block !important; margin-top: 6px; }
+  .stats { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat { padding: 12px; }
+  .stat .label { font-size: 12px; }
+  main { padding: 16px 12px 40px; }
+  .top { padding: 10px 12px; gap: 10px; flex-wrap: wrap; } .top nav { order: 3; width: 100%; }
+  .who small { display: none; }
+  .stat .value { font-size: 20px; }
+  th, td { padding: 10px 6px; }
+  td.num { white-space: nowrap; }
+  th.num { white-space: normal; }
+  td.account { width: 100%; }
+  td.account a { overflow-wrap: anywhere; }
+  .risk { min-width: 0; padding: 2px 7px; }
+  table { font-size: 13px; }
+}
+</style></head><body>${nav}<main>${body}</main>
+<p class="footnote">Scores are a model's estimate from synthetic test data, not a forecast about real customers.</p>
 </body></html>`;
 }
 
@@ -154,9 +275,10 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
     res.type("html").send(
       page(
         "Sign in",
-        `<h1>Sign in (development)</h1><p class="muted">Stand-in for company sign-in. Pick a CSM to see their renewals.</p>
-         <form method="post" action="/login"><select name="who">${options}</select>
-         ${demoAccessCode ? '<input name="code" type="password" placeholder="Demo access code" required>' : ""} <button>Sign in</button></form>`,
+        `<div class="login"><div class="card login-card"><h1>Sign in</h1><p class="lede small">Development stand-in for company sign-in. Pick a CSM to see their renewals.</p>
+         <form method="post" action="/login">
+         <label>CSM<select name="who">${options}</select></label>
+         ${demoAccessCode ? '<label>Demo access code<input name="code" type="password" required></label>' : ""}<button>Sign in</button></form></div></div>`,
         null,
       ),
     );
@@ -209,32 +331,39 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       const unknown = rows.filter((r) => r.probability === null);
       const callRow = (r: (typeof rows)[number], rank: number): string => {
         const alert = alerts.get(r.sf_id);
-        const handled = alert?.status === "suppressed" ? "<span class='chip'>Already contacted</span>" : "";
+        const handled = alert?.status === "suppressed" ? "<span class='chip done'>Already contacted</span>" : "";
         return `<tr>
-          <td>${rank}</td>
-          <td><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><br>${handled}</td>
-          <td>${pct(r.probability)}</td>
-          <td>${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
-          <td>${esc(r.renewal_date ?? "unknown")}<br><span class="muted">${r.days_to_renewal} days</span></td>
-          <td>${topReasons(r.reasons, 3)}</td>
+          <td class="hide-sm"><span class="rank">${rank}</span></td>
+          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a>${handled ? `<br>${handled}` : ""}<div class="why-inline">${topReasons(r.reasons, 2)}</div></td>
+          <td class="num">${riskPill(r.probability)}</td>
+          <td class="num">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
+          <td class="date hide-sm">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
+          <td class="why-col">${topReasons(r.reasons, 3)}</td>
         </tr>`;
       };
       const table = (list: string[]): string =>
-        `<div class="scroll"><table><thead><tr><th>#</th><th>Account</th><th>Chance of leaving (90 days)</th><th>Money at risk</th><th>Renewal</th><th>Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
+        `<div class="table-wrap"><table><thead><tr><th class="hide-sm">#</th><th>Account</th><th class="num">Chance of leaving</th><th class="num">Money at risk</th><th class="hide-sm">Renewal</th><th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
       const top = scored.slice(0, CALL_CAPACITY);
       const watch = scored.slice(CALL_CAPACITY);
+      const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
       return `${banner}
         <h1>Renewals to work this week</h1>
-        <p class="muted">Model ${esc(published.model_id)} · scored ${esc(published.as_of)} · run ${esc(published.run_id)}</p>
-        <h2>This week's calls (top ${CALL_CAPACITY} by money at risk)</h2>
-        ${top.length ? table(top.map((r, i) => callRow(r, i + 1))) : "<p class='muted'>No renewals in the next 90 days.</p>"}
-        <h2>Watch list</h2>
-        ${watch.length ? table(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<p class='muted'>Nothing else.</p>"}
-        <h2>Not scored: shown as unknown, never as safe</h2>
-        ${unknown.length ? `<div class="scroll"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
-          .map((r) => `<tr><td>${esc(r.company_name)}</td><td>${esc(r.renewal_date ?? "unknown")} (${r.days_to_renewal} days)</td><td>${esc(r.unknown_reason)}</td></tr>`)
-          .join("")}</tbody></table></div>` : "<p class='muted'>None.</p>"}`;
+        <p class="lede small">Scored ${esc(published.as_of)} · model ${esc(published.model_id)} · <a href="/runs">run log</a></p>
+        <div class="stats">
+          <div class="card stat"><div class="label">Calls to make</div><div class="value">${top.length}</div><div class="hint">Top ${CALL_CAPACITY} by money at risk</div></div>
+          <div class="card stat"><div class="label">Money at risk on those calls</div><div class="value">${money(callMoney)}</div><div class="hint">Chance of leaving × contract value</div></div>
+          <div class="card stat"><div class="label">Renewals scored</div><div class="value">${scored.length}</div><div class="hint">Next 90 days</div></div>
+          <div class="card stat"><div class="label">Not scored</div><div class="value">${unknown.length}</div><div class="hint">Shown as unknown, never as safe</div></div>
+        </div>
+        <div class="section-head"><h2>This week's calls</h2><span class="muted small">Highest money at risk first</span></div>
+        ${top.length ? table(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No renewals in the next 90 days.</div>"}
+        <div class="section-head"><h2>Watch list</h2><span class="muted small">Next in line, after this week's calls</span></div>
+        ${watch.length ? table(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<div class='card empty'>Nothing else to watch.</div>"}
+        <div class="section-head"><h2>Not scored</h2><span class="muted small">Shown as unknown with the reason, never as safe</span></div>
+        ${unknown.length ? `<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
+          .map((r) => `<tr><td class="account">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
+          .join("")}</tbody></table></div>` : "<div class='card empty'>Every renewal in the window is scored.</div>"}`;
     });
     res.type("html").send(page("My renewals", html, session));
   });
@@ -266,13 +395,17 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         })
         .join("");
 
-      return `<h1>${esc(row.company_name)}</h1>
-        <p><strong>Chance of leaving in 90 days: ${pct(row.probability)}</strong> · Money at risk: ${money(Number(row.money_at_risk))} · Renewal ${esc(row.renewal_date ?? "unknown")} (${row.days_to_renewal} days)</p>
-        ${contacted ? `<p class="muted">Last CSM contact: ${esc(contacted.action_date)}</p>` : ""}
+      return `<p class="small"><a href="/">← This week’s calls</a></p>
+        <div class="account-head"><h1>${esc(row.company_name)}</h1>${contacted ? `<span class="chip done">Last contact ${esc(contacted.action_date)}</span>` : ""}</div>
+        <div class="stats">
+          <div class="card stat"><div class="label">Chance of leaving in 90 days</div><div class="value">${pct(row.probability)}</div></div>
+          <div class="card stat"><div class="label">Money at risk</div><div class="value">${money(Number(row.money_at_risk))}</div></div>
+          <div class="card stat"><div class="label">Renewal</div><div class="value">${esc(row.renewal_date ?? "unknown")}</div><div class="hint">${row.days_to_renewal} days away</div></div>
+        </div>
         <h2>Why this score</h2>
         <p class="muted">Each reason is the model's weight for that signal times how far this account is from the average. Positive contributions push the risk up. The total is passed through a standard formula to give the chance above.</p>
-        <div class="scroll"><table><thead><tr><th>Signal</th><th>This account</th><th>Weight</th><th>Effect</th><th>Source records</th></tr></thead><tbody>${reasonRows}</tbody></table></div>
-        <p class="muted">Check: bias ${esc(Number(model?.bias ?? 0).toFixed(4))} + sum of effects ${esc(sumContributions.toFixed(4))} → chance ${pct(recomputed)} (stored ${pct(row.probability)}).</p>
+        <div class="table-wrap"><table><thead><tr><th>Signal</th><th>This account</th><th>Weight</th><th>Effect</th><th>Source records</th></tr></thead><tbody>${reasonRows}</tbody></table></div>
+        <div class="check">Check: bias ${esc(Number(model?.bias ?? 0).toFixed(4))} + sum of effects ${esc(sumContributions.toFixed(4))} → chance ${pct(recomputed)} (stored ${pct(row.probability)}).</div>
         <h2>Trace</h2>
         <p class="muted">Run <code>${esc(published.run_id)}</code> · data as of ${esc(published.as_of)} · model <code>${esc(published.model_id)}</code> · trained ${esc(model?.trained_at ?? "")}</p>
         <h2>Automatic messages</h2>
@@ -312,10 +445,10 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         )
       ).rows;
       return `<h1>Run log</h1>
-        <p class="muted">Every nightly attempt is listed. Only succeeded runs are published to CSMs.</p>
-        <div class="scroll"><table><thead><tr><th>Started</th><th>As of</th><th>Status</th><th>Scored</th><th>Unknown</th><th>Published</th><th>Error</th></tr></thead><tbody>
+        <p class="lede small">Every nightly attempt. Only succeeded runs are shown to CSMs.</p>
+        <div class="table-wrap"><table><thead><tr><th>Started</th><th>As of</th><th>Status</th><th>Scored</th><th>Unknown</th><th>Live now</th><th>Error</th></tr></thead><tbody>
         ${runs.map((r: { started_at: Date; as_of: string; status: string; scored_count: number | null; unknown_count: number | null; published: boolean; error: string | null }) => `<tr>
-          <td>${esc(new Date(r.started_at).toISOString().replace("T", " ").slice(0, 16))}</td><td>${esc(r.as_of)}</td><td>${esc(r.status)}</td>
+          <td>${esc(new Date(r.started_at).toISOString().replace("T", " ").slice(0, 16))}</td><td>${esc(r.as_of)}</td><td><span class="status ${esc(r.status)}">${esc(r.status)}</span></td>
           <td>${esc(r.scored_count ?? "")}</td><td>${esc(r.unknown_count ?? "")}</td><td>${r.published ? "yes" : "no"}</td><td>${esc(r.error ?? "")}</td></tr>`).join("")}
         </tbody></table></div>`;
     });
@@ -332,7 +465,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
 export function start(port: number): void {
   const secret = process.env["SESSION_SECRET"];
   if (!secret || secret.length < 16) throw new Error("SESSION_SECRET must be set (16+ characters)");
-  const app = buildApp(webPool(), secret);
+  const app = buildApp(webPool(), secret, process.env["DEMO_ACCESS_CODE"] ?? null);
   app.listen(port, () => console.log(`CSM app on http://localhost:${port}`));
 }
 

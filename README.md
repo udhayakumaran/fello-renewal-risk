@@ -29,6 +29,8 @@ PORT=3000 node --env-file=.env dist/src/web/server.js   # CSM app at http://loca
 npm test                       # 15 checks, including tenant isolation and traceability
 npm run evaluate               # model vs simple rule, on a held-out date
 npm run deck                  # build docs/renewal-risk-deck.pptx
+python3 e2e/run.py            # 25 browser checks through the real app (needs Playwright; writes one test call record)
+BASE_URL=https://... python3 e2e/run.py --read-only   # same checks against the live site, no writes
 ```
 
 To run the nightly job itself on a schedule: `node --env-file=.env dist/src/pipeline/nightly.js --at 02:00`.

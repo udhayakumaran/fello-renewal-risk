@@ -143,6 +143,47 @@ function topReasons(reasons: Reason[], n: number, typical: Map<string, number>):
   return positive.map((r) => `<span class='chip'>${esc(reasonDetail(r, typical.get(r.feature)))}</span>`).join(" ");
 }
 
+/**
+ * Click a sortable header: first click uses data-first, second flips it, third restores ranking order.
+ * Rows are sorted from the ranking order each time, so equal values keep their rank (stable sort).
+ * Missing values (data-sort empty) sort last in both directions.
+ */
+const SORT_SCRIPT = `<script>
+(() => {
+  const ICON = { none: "↕", ascending: "▲", descending: "▼" };
+  document.querySelectorAll("table.sortable").forEach((table) => {
+    const body = table.tBodies[0];
+    const ranking = Array.from(body.rows);
+    table.querySelectorAll("th[data-first]").forEach((th) => {
+      const button = th.querySelector("button");
+      const icon = th.querySelector(".sort-icon");
+      const numeric = th.dataset.type === "number";
+      const index = th.cellIndex;
+      button.addEventListener("click", () => {
+        const first = th.dataset.first;
+        const current = th.getAttribute("aria-sort");
+        const next = current === "none" || current === null ? first : current === first ? (first === "ascending" ? "descending" : "ascending") : "none";
+        table.querySelectorAll("th[aria-sort]").forEach((other) => {
+          other.setAttribute("aria-sort", "none");
+          other.querySelector(".sort-icon").textContent = ICON.none;
+        });
+        th.setAttribute("aria-sort", next);
+        icon.textContent = ICON[next];
+        const dir = next === "ascending" ? 1 : next === "descending" ? -1 : 0;
+        const value = (row) => row.cells[index].dataset.sort ?? "";
+        const rows = dir === 0 ? ranking : ranking.slice().sort((x, y) => {
+          const a = value(x);
+          const b = value(y);
+          if (a === "" || b === "") return (a === "") - (b === "");
+          return dir * (numeric ? Number(a) - Number(b) : a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
+        });
+        body.append(...rows);
+      });
+    });
+  });
+})();
+</script>`;
+
 function page(title: string, body: string, session: Session | null): string {
   const nav = session
     ? `<header class="top">
@@ -213,6 +254,11 @@ tbody tr:hover td { background: var(--accent-soft); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.date { white-space: nowrap; }
 td.account a { font-weight: 600; color: var(--fg); } td.account a:hover { color: var(--accent); }
+.sort-btn { font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+.sort-btn:hover { color: var(--fg); filter: none; }
+.sort-icon { font-size: 10px; opacity: .5; }
+th[aria-sort]:not([aria-sort="none"]) .sort-icon { opacity: 1; color: var(--accent); }
+th[aria-sort]:not([aria-sort="none"]) .sort-btn { color: var(--fg); }
 .rank { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--chip); color: var(--chip-fg); font-size: 12px; font-weight: 600; }
 .risk { display: inline-block; min-width: 64px; text-align: center; padding: 3px 9px; border-radius: 999px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .risk.red { background: var(--bad-soft); color: var(--bad); }
@@ -385,16 +431,19 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         contactedIds,
       );
       const scored = rows.filter((r) => r.probability !== null);
+      // data-sort holds the raw value the client-side sort reads; empty means no value (sorts last).
       const callRow = (r: (typeof rows)[number], rank: number | null): string => `<tr>
           <td class="hide-sm"><span class="rank">${rank ?? "n/a"}</span></td>
-          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2, typical)}</div></td>
-          <td class="num">${riskPill(r.probability, rate)}</td>
-          <td class="num">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
-          <td class="date hide-sm">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
+          <td class="account" data-sort="${esc(r.company_name)}"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2, typical)}</div></td>
+          <td class="num" data-sort="${r.probability ?? ""}">${riskPill(r.probability, rate)}</td>
+          <td class="num" data-sort="${r.money_at_risk ?? ""}">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
+          <td class="date hide-sm" data-sort="${r.days_to_renewal}">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
           <td class="why-col">${topReasons(r.reasons, 3, typical)}</td>
         </tr>`;
+      const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending"): string =>
+        `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button></th>`;
       const table = (list: string[]): string =>
-        `<div class="table-wrap"><table><thead><tr><th class="hide-sm">#</th><th>Account</th><th class="num">Chance of leaving</th><th class="num">Money at risk</th><th class="hide-sm">Renewal</th><th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
+        `<div class="table-wrap"><table class="sortable"><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
       const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
       const example = scored[0];
@@ -430,7 +479,8 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         <div class="section-head"><h2>Not scored</h2><span class="muted small">Shown as unknown with the reason, never as safe</span></div>
         ${unknown.length ? `<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
           .map((r) => `<tr><td class="account">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
-          .join("")}</tbody></table></div>` : "<div class='card empty'>Every renewal in the window is scored.</div>"}`;
+          .join("")}</tbody></table></div>` : "<div class='card empty'>Every renewal in the window is scored.</div>"}
+        ${SORT_SCRIPT}`;
     });
     res.type("html").send(page("My renewals", html, session));
   });

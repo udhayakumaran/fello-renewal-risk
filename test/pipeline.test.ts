@@ -7,7 +7,7 @@ import { indexSources } from "../src/index-sources.js";
 import type { RawData } from "../src/load.js";
 import { auc, fitLogistic, predict } from "../src/model.js";
 import { baseRate, bandOf, splitCalls } from "../src/ranking.js";
-import { makeCookie, readCookie } from "../src/web/server.js";
+import { makeCookie, readCookie, reasonDetail, typicalByFeature } from "../src/web/server.js";
 
 const sfRow = (overrides: Partial<CsvRow>): CsvRow => ({
   sf_id: "SF1",
@@ -94,4 +94,19 @@ test("session cookie: a valid one is read back; an expired or tampered one is re
   const widened = Buffer.from(JSON.stringify({ org: "org_b", csm: "org_b-CSM1", exp: Date.now() + 60_000 })).toString("base64url");
   assert.equal(readCookie(`${widened}.${mac}`, secret), null, "changing the payload breaks the signature");
   assert.ok(payload);
+});
+
+test("reason chips show this account's value next to the typical one", () => {
+  const reason = (feature: string, label: string, value: number) => ({
+    feature, label, value, weight: 1, contribution: 1, sources: { ids: [], count: 0 },
+  });
+  const typical = typicalByFeature(["tickets_open", "usage_log_ratio", "log_contract_value", "inactive_contact_share"], [3, 0, Math.log(9500), 0.25]);
+
+  assert.equal(reasonDetail(reason("tickets_open", "Support tickets still open", 9), typical.get("tickets_open")), "Support tickets still open: 9 vs typical 3");
+  assert.equal(reasonDetail(reason("tickets_open", "Support tickets still open", 2.5), 2.4), "Support tickets still open: 2.5 vs typical 2.4");
+  assert.equal(reasonDetail(reason("usage_log_ratio", "Usage trend falling", Math.log(0.7)), typical.get("usage_log_ratio")), "Usage trend falling: -30% vs typical 0%");
+  assert.equal(reasonDetail(reason("log_contract_value", "Contract value ($)", 12000), typical.get("log_contract_value")), "Contract value: $12,000 vs typical $9,500");
+  assert.equal(reasonDetail(reason("inactive_contact_share", "Some contacts marked inactive", 0.5), typical.get("inactive_contact_share")), "Some contacts marked inactive: 50% vs typical 25%");
+  assert.equal(reasonDetail(reason("tickets_open", "Support tickets still open", 9), undefined), "Support tickets still open: 9");
+  assert.equal(reasonDetail(reason("log_contract_value", "Contract value ($)", 1), typical.get("log_contract_value")), "Contract value: not in CRM");
 });

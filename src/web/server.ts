@@ -102,10 +102,45 @@ function riskPill(p: number | null, rate: number): string {
   return `<span class="risk ${band}" title="${BAND_LABEL[band]} band">${pct(p)}</span>`;
 }
 
-function topReasons(reasons: Reason[], n: number): string {
+/** Typical value per model input: the training average the model centres each input on. */
+export function typicalByFeature(names: string[], means: number[]): Map<string, number> {
+  return new Map(names.map((name, j) => [name, means[j] ?? 0]));
+}
+
+const plain = (v: number): string => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+const signedPct = (fraction: number): string => {
+  const p = Math.round(fraction * 100);
+  return `${p > 0 ? "+" : ""}${p}%`;
+};
+
+/** Display units per feature. Model means for these are on a log or fraction scale, so they are converted here. */
+const SHOWN: Record<string, (v: number) => string> = {
+  log_contract_value: (v) => money(v),
+  usage_log_ratio: (v) => signedPct(Math.exp(v) - 1),
+  inactive_contact_share: (v) => `${Math.round(v * 100)}%`,
+  tenure_days: (v) => `${Math.round(v)} days`,
+};
+
+/**
+ * One reason chip: this account's value next to the typical one, e.g. "Support tickets still open: 9 vs typical 3".
+ * Typical is the training average (models.feature_mean), not this month's portfolio.
+ */
+export function reasonDetail(r: Reason, typicalMean: number | undefined): string {
+  const shown = SHOWN[r.feature] ?? plain;
+  if (r.feature === "log_contract_value") {
+    // A missing contract value is stored as log 0, which reads as $1. Say so instead.
+    if (r.value <= 1) return "Contract value: not in CRM";
+    const typical = typicalMean === undefined ? "" : ` vs typical ${shown(Math.exp(typicalMean))}`;
+    return `Contract value: ${shown(r.value)}${typical}`;
+  }
+  if (typicalMean === undefined) return `${r.label}: ${shown(r.value)}`;
+  return `${r.label}: ${shown(r.value)} vs typical ${shown(typicalMean)}`;
+}
+
+function topReasons(reasons: Reason[], n: number, typical: Map<string, number>): string {
   const positive = reasons.filter((r) => r.contribution > 0).slice(0, n);
   if (positive.length === 0) return "<span class='muted'>No warning signs</span>";
-  return positive.map((r) => `<span class='chip'>${esc(r.label)}</span>`).join(" ");
+  return positive.map((r) => `<span class='chip'>${esc(reasonDetail(r, typical.get(r.feature)))}</span>`).join(" ");
 }
 
 function page(title: string, body: string, session: Session | null): string {
@@ -185,6 +220,9 @@ td.account a { font-weight: 600; color: var(--fg); } td.account a:hover { color:
 .risk.green { background: var(--ok-soft); color: var(--ok); }
 .chip { display: inline-block; background: var(--chip); color: var(--chip-fg); border-radius: 999px; padding: 2px 9px; font-size: 12px; margin: 2px 4px 2px 0; white-space: nowrap; }
 .why-inline { display: none; } .why-inline .chip { font-size: 11.5px; white-space: normal; max-width: 100%; text-align: left; }
+.why-col .chip { white-space: normal; border-radius: 10px; line-height: 1.35; text-align: left; }
+.how ul { margin: 8px 0 0; padding-left: 18px; } .how li { margin: 5px 0; } .how h2 { margin: 0; font-size: 16px; }
+.how .small { margin: 10px 0 0; }
 .chip.done { background: var(--ok-soft); color: var(--ok); }
 .status { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .status.succeeded { background: var(--ok-soft); color: var(--ok); }
@@ -333,8 +371,9 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           [published.run_id, session.csm],
         )
       ).rows as { sf_id: string; company_name: string; probability: number | null; money_at_risk: string | null; renewal_date: string | null; days_to_renewal: number; unknown_reason: string | null; reasons: Reason[] }[];
-      const model = (await c.query("select training_leavers, training_rows from models where model_id = $1", [published.model_id])).rows[0];
+      const model = (await c.query("select training_leavers, training_rows, feature_names, feature_mean from models where model_id = $1", [published.model_id])).rows[0];
       const rate = baseRate(Number(model?.training_leavers ?? 0), Number(model?.training_rows ?? 0));
+      const typical = typicalByFeature(model?.feature_names ?? [], (model?.feature_mean ?? []).map(Number));
       const contactedIds = new Set(
         (await c.query("select distinct sf_id from csm_actions where action_date > current_date - $1::int", [CONTACT_WINDOW_DAYS]))
           .rows.map((r: { sf_id: string }) => r.sf_id),
@@ -348,21 +387,33 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       const scored = rows.filter((r) => r.probability !== null);
       const callRow = (r: (typeof rows)[number], rank: number | null): string => `<tr>
           <td class="hide-sm"><span class="rank">${rank ?? "n/a"}</span></td>
-          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2)}</div></td>
+          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2, typical)}</div></td>
           <td class="num">${riskPill(r.probability, rate)}</td>
           <td class="num">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
           <td class="date hide-sm">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
-          <td class="why-col">${topReasons(r.reasons, 3)}</td>
+          <td class="why-col">${topReasons(r.reasons, 3, typical)}</td>
         </tr>`;
       const table = (list: string[]): string =>
         `<div class="table-wrap"><table><thead><tr><th class="hide-sm">#</th><th>Account</th><th class="num">Chance of leaving</th><th class="num">Money at risk</th><th class="hide-sm">Renewal</th><th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
       const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
+      const example = scored[0];
       // Two decimals, so a pill at the line is never shown as on the wrong side of it.
       const pctOf = (x: number): string => `${(x * 100).toFixed(2)}%`;
       return `${banner}
         <h1>Renewals to work this week</h1>
         <p class="lede small">Scored ${esc(published.as_of)} · model ${esc(published.model_id)} · <a href="/runs">run log</a></p>
+        <section class="callout how">
+          <h2>How this list works</h2>
+          <ul>
+            <li><strong>Chance of leaving in 90 days</strong> comes from a logistic model trained on past renewals. It weighs usage, support tickets, cancel or downgrade signals, tenure, contract value and inactive contacts into one probability.</li>
+            <li><strong>Why chips</strong> show this account's value next to the typical value, the average the model learned from past renewals.</li>
+            <li><strong>Money at risk</strong> = chance of leaving × contract value from the CRM. It is an expected value, not a forecast. No contract value counts as $0.</li>
+            <li><strong>Order and capacity:</strong> calls are the top ${CALL_CAPACITY} by money at risk, highest first, ties by account ID. The next accounts form the watch list. Unscored accounts are listed under Not scored, never as safe.</li>
+            <li><strong>Contact window:</strong> an account you contacted in the last ${CONTACT_WINDOW_DAYS} days is taken off the list before the cut, so it does not use a call slot.</li>
+          </ul>
+          ${example ? `<p class="small">Full math for any account is on its page, for example <a href="/account/${esc(example.sf_id)}">${esc(example.company_name)}</a>.</p>` : ""}
+        </section>
         <div class="stats">
           <div class="card stat"><div class="label">Calls to make</div><div class="value">${top.length}</div><div class="hint">Top ${CALL_CAPACITY} by money at risk, not contacted in ${CONTACT_WINDOW_DAYS} days</div></div>
           <div class="card stat"><div class="label">Money at risk on those calls</div><div class="value">${money(callMoney)}</div><div class="hint">Chance of leaving × contract value</div></div>

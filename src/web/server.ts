@@ -101,8 +101,8 @@ const BAND_TIP: Record<Band, string> = {
   green: "Green: About normal or lower.",
 };
 const HEADER_HELP = {
-  chance: "About 30 out of 100 customers like this one left at renewal.",
-  money: "A $10,000 contract with a 30% chance of leaving shows $3,000 at risk.",
+  chance: "If it shows 5%, about 5 in 100 customers like this one left at renewal.",
+  money: "A $10,000 contract with a 5% chance of leaving shows $500 at risk.",
   renewal: "When this contract is up for renewal.",
   why: "What looks different about this account compared with a typical customer.",
 };

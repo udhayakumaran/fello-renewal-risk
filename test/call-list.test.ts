@@ -69,7 +69,7 @@ test("search filters each group on its own and says so when a group has no match
 test("header tooltip: tap opens it, a second tap or Escape closes it, and it is linked to its button", { skip }, async () => {
   const { page, close } = await openPage();
   try {
-    const tipText = page.locator("[role=tooltip]", { hasText: "About 30 out of 100" }).first();
+    const tipText = page.locator("[role=tooltip]", { hasText: "about 5 in 100" }).first();
     const trigger = page.locator("button.tip-btn[aria-label='About Chance of leaving']").first();
     assert.equal(await tipText.isVisible(), false, "hidden at rest");
     assert.equal(await trigger.getAttribute("aria-describedby"), await tipText.getAttribute("id"), "button is described by its tooltip");
@@ -118,5 +118,5 @@ test("tooltips: each trigger points at its text, and the ids are unique on the p
   const ids = [...html.matchAll(/id="(tip-\d+)"/g)].map((m) => m[1]);
   assert.equal(new Set(ids).size, ids.length, "ids unique");
   for (const id of ids) assert.ok(html.includes(`aria-describedby="${id}"`), `${id} has a trigger`);
-  assert.ok(html.includes("About 30 out of 100 customers like this one left at renewal."), "header tooltip text");
+  assert.ok(html.includes("If it shows 5%, about 5 in 100 customers like this one left at renewal."), "header tooltip text");
 });

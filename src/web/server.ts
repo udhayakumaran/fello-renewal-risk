@@ -95,12 +95,37 @@ interface Reason {
 }
 
 const BAND_LABEL: Record<Band, string> = { red: "Red", amber: "Amber", green: "Green" };
+const BAND_TIP: Record<Band, string> = {
+  red: "Red: Much more likely to leave than a typical customer, at least 2 times the usual rate.",
+  amber: "Amber: More likely to leave than usual.",
+  green: "Green: About normal or lower.",
+};
+const HEADER_HELP = {
+  chance: "About 30 out of 100 customers like this one left at renewal.",
+  money: "A $10,000 contract with a 30% chance of leaving shows $3,000 at risk.",
+  renewal: "When this contract is up for renewal.",
+  why: "What looks different about this account compared with a typical customer.",
+};
+
+let tipSeq = 0;
+/**
+ * A tooltip on one trigger. Hover and keyboard focus show it in CSS, a tap toggles it (TIP_SCRIPT).
+ * The trigger points at the text with aria-describedby, so screen readers announce it too.
+ */
+function tip(trigger: (id: string) => string, text: string): string {
+  const id = `tip-${++tipSeq}`;
+  return `<span class="tip">${trigger(id)}<span role="tooltip" id="${id}" class="tip-text">${esc(text)}</span></span>`;
+}
 
 function riskPill(p: number | null, rate: number): string {
   if (p === null) return "<span class='muted'>n/a</span>";
   const band = bandOf(Number(p), rate);
-  return `<span class="risk ${band}" title="${BAND_LABEL[band]} band">${pct(p)}</span>`;
+  return tip((id) => `<span class="risk ${band}" tabindex="0" aria-describedby="${id}">${pct(p)}</span>`, BAND_TIP[band]);
 }
+
+/** Info button for a column header. It sits after the sort button, so the sort script still finds the sort button first. */
+const headTip = (label: string, text: string): string =>
+  tip((id) => `<button type="button" class="tip-btn" aria-label="About ${esc(label)}" aria-describedby="${id}">?</button>`, text);
 
 /** Typical value per model input: the training average the model centres each input on. */
 export function typicalByFeature(names: string[], means: number[]): Map<string, number> {
@@ -137,10 +162,65 @@ export function reasonDetail(r: Reason, typicalMean: number | undefined): string
   return `${r.label}: ${shown(r.value)} vs typical ${shown(typicalMean)}`;
 }
 
+const plural = (n: number, word: string): string => `${n} ${n === 1 ? word : `${word}s`}`;
+
+/**
+ * Plain sentence for one reason chip, shown as its tooltip. Counts use the same template:
+ * "This account has 9 open support tickets, while a typical customer has 3."
+ */
+export function reasonSentence(r: Reason, typicalMean: number | undefined): string {
+  const against = (own: string, typical: string | undefined): string =>
+    typicalMean === undefined || typical === undefined ? `${own}.` : `${own}, while a typical customer has ${typical}.`;
+  const counted = (word: string, tail: string): string =>
+    against(`This account has ${plural(Math.round(r.value), word)}${tail}`, typicalMean === undefined ? undefined : String(Math.round(typicalMean)));
+  switch (r.feature) {
+    case "usage_now_90d":
+      return counted("product event", " in the last 90 days");
+    case "usage_prior_90d":
+      return counted("product event", " in the 90 days before that");
+    case "tickets_open":
+      return counted("open support ticket", "");
+    case "tickets_opened_90d":
+      return counted("support ticket", " opened in the last 90 days");
+    case "cancel_warning_120d":
+      return counted("cancel-at-renewal request", " in the last 120 days");
+    case "downgrade_120d":
+      return counted("downgrade", " in the last 120 days");
+    case "usage_drop": {
+      const change = (v: number): string => (v >= 0 ? `dropped by ${Math.round(v)}` : `rose by ${Math.round(-v)}`);
+      return against(`This account's product events ${change(r.value)} over the last 180 days`, typicalMean === undefined ? undefined : change(typicalMean));
+    }
+    case "usage_log_ratio":
+      return against(
+        `This account's product events changed by ${signedPct(Math.exp(r.value) - 1)} from the 90 days before`,
+        typicalMean === undefined ? undefined : `changed by ${signedPct(Math.exp(typicalMean) - 1)}`,
+      );
+    case "tenure_days":
+      return against(`This account has been a customer for ${Math.round(r.value)} days`, typicalMean === undefined ? undefined : `been one for ${Math.round(typicalMean)} days`);
+    case "inactive_contact_share":
+      return against(
+        `${Math.round(r.value * 100)}% of this account's contacts are marked inactive`,
+        typicalMean === undefined ? undefined : `${Math.round(typicalMean * 100)}% of its contacts inactive`,
+      );
+    case "log_contract_value":
+      if (r.value <= 1) return "This account has no contract value in the CRM, so it shows $0 at risk.";
+      return against(`This account's contract is ${money(Math.exp(r.value))}`, typicalMean === undefined ? undefined : money(Math.exp(typicalMean)));
+    default:
+      return `${reasonDetail(r, typicalMean)}.`;
+  }
+}
+
 function topReasons(reasons: Reason[], n: number, typical: Map<string, number>): string {
   const positive = reasons.filter((r) => r.contribution > 0).slice(0, n);
   if (positive.length === 0) return "<span class='muted'>No warning signs</span>";
-  return positive.map((r) => `<span class='chip'>${esc(reasonDetail(r, typical.get(r.feature)))}</span>`).join(" ");
+  return positive
+    .map((r) =>
+      tip(
+        (id) => `<span class="chip" tabindex="0" aria-describedby="${id}">${esc(reasonDetail(r, typical.get(r.feature)))}</span>`,
+        reasonSentence(r, typical.get(r.feature)),
+      ),
+    )
+    .join(" ");
 }
 
 /**
@@ -184,6 +264,33 @@ export const SORT_SCRIPT = `<script>
 })();
 </script>`;
 
+/** Tooltip styles. Lives in a constant so the browser test page can include the same rules. */
+export const TIP_CSS = `
+.tip { position: relative; display: inline-block; max-width: 100%; }
+.tip-btn { width: 18px; height: 18px; margin-left: 4px; padding: 0; vertical-align: middle; border: 1px solid var(--line); border-radius: 50%; background: var(--chip); color: var(--muted); font: 600 11px/1 system-ui, sans-serif; cursor: pointer; }
+.tip-text { display: none; position: absolute; top: calc(100% + 6px); left: 0; z-index: 10; width: max-content; max-width: 260px; padding: 8px 10px; border-radius: 8px; background: #1f2430; color: #fff; font: 400 12.5px/1.4 Inter, system-ui, sans-serif; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
+.tip.open > .tip-text, .tip > [aria-describedby]:focus-visible ~ .tip-text { display: block; }
+.tip.dismissed > .tip-text { display: none !important; }
+@media (hover: hover) { .tip:hover > .tip-text { display: block; } }
+.tip-btn:focus-visible, .chip:focus-visible, .risk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+`;
+
+/** Tap or click a tooltip trigger to open its tooltip (touch has no hover). Tapping elsewhere or pressing Escape closes it. */
+export const TIP_SCRIPT = `<script>
+(() => {
+  document.addEventListener("click", (e) => {
+    const trigger = e.target.closest(".tip > [aria-describedby]");
+    document.querySelectorAll(".tip.open").forEach((t) => { if (t !== trigger?.parentElement) t.classList.remove("open"); });
+    trigger?.parentElement.classList.toggle("open");
+  });
+  // Escape dismisses even while the trigger keeps keyboard focus. Moving focus to another trigger shows tooltips again.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") document.querySelectorAll(".tip").forEach((t) => { t.classList.remove("open"); t.classList.add("dismissed"); });
+  });
+  document.addEventListener("focusin", () => document.querySelectorAll(".tip.dismissed").forEach((t) => t.classList.remove("dismissed")));
+})();
+</script>`;
+
 /**
  * Filters every call-list group by account name as you type. Each group filters its own rows, so
  * a match in Watch list never pulls a row into This week's calls. Hidden rows stay in the table,
@@ -209,24 +316,27 @@ export const SEARCH_SCRIPT = `<script>
 
 /** The "How this list works" bullets as [label, text]. Numbers come from ranking.ts so they stay true. */
 export const HOW_LIST_WORKS: [string, string][] = [
-  ["What the percentage means", "Out of 100 customers that look like this one, about this many left at renewal."],
-  ["Why it is on the list", "The chips show what looks unusual next to a typical customer, such as more open support tickets than most."],
-  ["Money at risk", "The chance of leaving times the contract value. No contract value on file counts as $0."],
-  ["The order", `This week's calls are the ${CALL_CAPACITY} accounts with the most money at risk, biggest first. The watch list is next in line after them.`],
-  ["Recently contacted", `An account you contacted in the last ${CONTACT_WINDOW_DAYS} days is skipped, so it does not take one of those ${CALL_CAPACITY} spots.`],
+  ["The percentage", "Think of 100 customers like this one, with similar usage, support tickets and contract. About this many of them left when their renewal came up."],
+  ["Why it's here", "Each chip is something that looks different from a normal customer. Use them as talking points on your call."],
+  ["Money at risk", "This is how much of the contract could be lost. It's a rough guide for who to call first, not a forecast."],
+  ["No contract value", "If we don't have the contract value, the account shows $0 and may sit lower than it should, so check the CRM."],
+  ["This week's calls", `The ${CALL_CAPACITY} accounts with the most money at risk. Call these first.`],
+  ["Watch list", "Next in line. Not urgent this week, but worth a check-in if you have time."],
+  ["Not scored", "We don't have enough data yet. That doesn't mean the account is safe."],
+  ["Recently contacted", `If you spoke to an account in the last ${CONTACT_WINDOW_DAYS} days, it's left off this week's list so you can focus on others.`],
 ];
 
 /** One call-list group. Search hides rows inside it and shows the note when none match. */
 const groupWrap = (tableHtml: string): string =>
   `<div class="group" data-group>${tableHtml}<div class="card empty" data-no-match hidden>No accounts in this group match that search.</div></div>`;
 
-const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending"): string =>
-  `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button></th>`;
+const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending", help?: string): string =>
+  `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button>${help ? headTip(label, help) : ""}</th>`;
 
 /** A sortable call table. Its rows are the only rows its sort touches, so groups never swap rows. */
 export function callTable(rows: string[]): string {
   return groupWrap(
-    `<div class="table-wrap"><table class="sortable"><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`,
+    `<div class="table-wrap"><table class="sortable"><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending", HEADER_HELP.chance)}${sortHead("Money at risk", "num", "number", "descending", HEADER_HELP.money)}${sortHead("Renewal", "hide-sm", "number", "ascending", HEADER_HELP.renewal)}<th class="why-col">Why${headTip("Why", HEADER_HELP.why)}</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`,
   );
 }
 
@@ -313,6 +423,7 @@ th[aria-sort]:not([aria-sort="none"]) .sort-btn { color: var(--fg); }
 .chip { display: inline-block; background: var(--chip); color: var(--chip-fg); border-radius: 999px; padding: 2px 9px; font-size: 12px; margin: 2px 4px 2px 0; white-space: nowrap; }
 .why-inline { display: none; } .why-inline .chip { font-size: 11.5px; white-space: normal; max-width: 100%; text-align: left; }
 .why-col .chip { white-space: normal; border-radius: 10px; line-height: 1.35; text-align: left; }
+${TIP_CSS}
 .how ul { margin: 8px 0 0; padding-left: 18px; } .how li { margin: 5px 0; } .how h2 { margin: 0; font-size: 16px; }
 .how .small { margin: 10px 0 0; }
 .chip.done { background: var(--ok-soft); color: var(--ok); }
@@ -521,7 +632,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         ${unknown.length ? groupWrap(`<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
           .map((r) => `<tr><td class="account" data-sort="${esc(r.company_name)}">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
           .join("")}</tbody></table></div>`) : "<div class='card empty'>Every renewal in the window is scored.</div>"}
-        ${SORT_SCRIPT}${rows.length ? SEARCH_SCRIPT : ""}`;
+        ${SORT_SCRIPT}${TIP_SCRIPT}${rows.length ? SEARCH_SCRIPT : ""}`;
     });
     res.type("html").send(page("My renewals", html, session));
   });

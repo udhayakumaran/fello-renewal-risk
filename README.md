@@ -7,9 +7,11 @@ source records. The list is built nightly by a job that runs without anyone star
 Read `BRIEF.md` first for the problem and the disagreements with the request. This file covers what
 was built, what was decided, what was skipped, and what breaks first.
 
+Loom walkthrough: LINK_TBD
+
 ## Live demo
 
-- App: https://fello-renewal-risk-udhayakumarans-projects.vercel.app (sign-in asks for the demo access code, which is not in this repo)
+- App: https://fello-renewal-risk.vercel.app/ (sign-in asks for the demo access code, which is not in this repo). The same app is also at https://fello-renewal-risk-udhayakumarans-projects.vercel.app/.
 - Database: Supabase project `fello-renewal-risk` (Singapore). The nightly run is a Vercel Cron job at 02:00 IST, protected by `CRON_SECRET`.
 - Known gap: the database connection is encrypted but does not yet verify Supabase's certificate (`sslmode=no-verify`). Fix: verify against Supabase's root CA before relying on it outside a demo.
 
@@ -26,7 +28,7 @@ supabase migration up --local  # database schema and tenant rules
 npm run db:load                # load the source data (development reset: clears scoring tables too)
 npm run nightly                # train, score, publish for every org
 PORT=3000 node --env-file=.env dist/src/web/server.js   # CSM app at http://localhost:3000
-npm test                       # 15 checks, including tenant isolation and traceability
+npm test                       # 21 checks, including tenant isolation, cookie expiry and traceability
 npm run evaluate               # model vs simple rule, on a held-out date
 npm run deck                  # build docs/renewal-risk-deck.pptx
 npm run e2e                   # 25 browser checks through the real app (Playwright; writes one test call record)
@@ -42,13 +44,13 @@ To show the failure path: `FORCE_FAIL=org_b npm run nightly`. That run is logged
 |---|---|
 | Synthetic data | 5,000 customers in 4 orgs, three years of history. Five sources (Salesforce, Zendesk, product events, Stripe, Gmail metadata), about 201,000 event rows. Messy on purpose: out-of-order arrival, replayed events, duplicate CRM records, missing renewal dates, impossible dates, personal email addresses, customers with almost no activity. |
 | Matching | Email domain first, then company name, and only when exactly one customer has that name. Unmatched records go to a review count, never dropped. |
-| As-of features | 12 inputs per customer, computed only from records the system had received by the scoring date. A test proves a late-arriving event is ignored. |
+| As-of features | 11 inputs per customer, computed only from records the system had received by the scoring date. A test proves a late-arriving event is ignored. |
 | Model | Logistic regression written by hand (`src/model.ts`), so every reason is a weight times a value. Trained on past renewals only. |
 | Labels | A customer counts as leaving if they cancel, or a renewal invoice is never paid or attempted, within 90 days. A failed card is not a departure. |
 | Population | Only renewals in the next 90 days. Customers that can't be scored show as **unknown**, never as safe. |
 | Nightly job | Trains, scores every org, writes alerts and card reminders, then publishes. Each org is all-or-nothing: a failure rolls back and the last good run stays published. The run log shows every attempt. |
-| CSM app | Login (development stand-in), ranked list, top 15 as this week's calls, account page with every reason, its source records, and a check that recomputes the score. A "contacted" button feeds the rule that stops duplicate outreach. |
-| Tenancy | Postgres row-level security on every table, keyed to the `org_id` in a signed token. Tested through the API and directly. |
+| CSM app | Login (development stand-in), ranked list, top 15 as this week's calls, account page with every reason, its source records, and a check that recomputes the score. Red / amber / green bands are set from the model's training base rate (red at twice the base rate, amber at the base rate). A "contacted" button takes an account off the call list for 14 days before the top 15 is cut, so a contact frees its slot. |
+| Tenancy | Postgres row-level security on every table, keyed to the `org_id` claim. The web app sets that claim from its own HMAC-signed, expiring session cookie; the database does not verify a token on this path. Tested through the API and in the browser. |
 
 ## Decisions and why
 
@@ -59,7 +61,7 @@ To show the failure path: `FORCE_FAIL=org_b npm run nightly`. That run is logged
 5. **Silent leavers are kept.** Half of the generated departures have no warning signs. Without them the model scored 0.95, which would have looked like a fake result. The model cannot catch these customers, and the README says so.
 6. **The model does not use days-to-renewal.** It only sets the 90-day population. As a model input it had a counter-intuitive positive weight, most likely an artifact of billing cycles, and it is not something a CSM can act on.
 7. **Labels count only never-attempted invoices as departures.** Failed cards are treated as support cases, as the brief says. Side effect: 21 of 1,640 test customers disagree with the answer key, because some real departures look like card failures. This is the ambiguity the brief describes, not something to hide.
-8. **Tenant isolation is in the database.** The org comes from a signed token that the database verifies. Even a bug in the app can't read another org's rows. Tests prove it.
+8. **Tenant isolation is in the database, driven by the app.** RLS filters every table by the org claim. The app sets that claim from a verified session cookie, so the trust boundary is the app's cookie check. A bug that sets the wrong claim would widen access. Tests cover the wrong-org, forged, expired and tampered-cookie cases. The stronger fix is a database-verified token for the web app, listed as a next step.
 
 ## Results (synthetic data only)
 
@@ -67,7 +69,7 @@ Held-out date 2026-06-15. Trained only on earlier renewals.
 
 | | Model | Simple rule (usage drop) |
 |---|---|---|
-| AUC (1.0 perfect, 0.5 coin flip), 95% range | 0.71 (0.65–0.85) | 0.60 (0.51–0.69) |
+| AUC (1.0 perfect, 0.5 coin flip), 95% range | 0.71 (0.65 to 0.85) | 0.60 (0.51 to 0.69) |
 | Leavers caught in each CSM's top 15 (of 29) | 18 | 12 |
 
 Read these numbers with care:
@@ -105,7 +107,7 @@ Roughly in the order it would bite:
 2. **Training loads all orgs at once.** Fix: train on a sample or on a dedicated job, and version each model.
 3. **Matching by company name is O(customers) per lookup.** At scale, blocking by domain and by normalised name prefix is needed; the current code is correct but slow.
 4. **Row-level security on large tables.** Policies are evaluated per row. At 10x the event table needs partitioning by org and month, and an index that matches the policy.
-5. **One scheduler process.** A crash or a second copy would run the job twice. Fix: a real scheduler (cron or a queue) with a lock per org.
+5. **Nightly run: Vercel Cron, no lock, 60-second limit.** `vercel.json` calls `/api/cron/nightly` once a day at 20:30 UTC (02:00 IST), and that function is capped at 60 seconds. Overlapping runs are not prevented: a manual call during the scheduled run starts a second one. Both write their own run rows, the later publish wins, and both can insert a card reminder for the same customer because `card_reminders` has no unique key. If the 60-second limit is hit, orgs that already published keep their new run, the org in progress rolls back and its run row stays `running`, and Vercel records a timeout. Fix: a Postgres advisory lock per run, a unique key on `card_reminders`, and a queue with one job per org once a run no longer fits in 60 seconds.
 6. **Alerts accumulate.** Alerts from old runs are not closed. The page filters by the published run, but the table grows. Fix: close alerts when a run is superseded.
 7. **The model is trained on synthetic patterns.** The first real data will shift the weights. Fix: monitor the score distribution and the top-15 hit rate each week, and retrain on a schedule.
 
@@ -114,7 +116,6 @@ Roughly in the order it would bite:
 - The results come from data I generated. The model learns the patterns I chose to put in the generator, so the numbers show the pipeline works, not that it will work on your customers.
 - Some of the signal depends on design choices I made (for example, the 90-day window and the 14-day suppression period). They are reasonable defaults, not measured values.
 - Labels count some real departures as card failures. The model cannot separate them.
-- The live system is not deployed yet. Deployment needs a host and approval.
 
 ## Files
 
@@ -123,7 +124,7 @@ Roughly in the order it would bite:
 - `gen/generate.ts`: synthetic data generator, with checks.
 - `src/`: matching, features, model, evaluation, nightly job, explanations, web app.
 - `supabase/migrations/`: schema, row-level security, and the scoring tables.
-- `test/`: 15 checks across the pipeline, the database rules, and the web app.
+- `test/`: 21 checks across the pipeline, the database rules, and the web app.
 - `docs/screenshots/`: what a CSM sees.
 - `docs/renewal-risk-deck.pptx`: the walkthrough deck (built by `npm run deck`).
 

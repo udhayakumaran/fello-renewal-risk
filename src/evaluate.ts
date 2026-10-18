@@ -91,8 +91,8 @@ const leavers = testY.filter(Boolean).length;
 console.log(`\ntest date ${TEST_DATE}: ${test.ids.length} customers renewing in next 90 days, ${leavers} leavers (${((leavers / test.ids.length) * 100).toFixed(1)}%)`);
 const [modelLo, modelHi] = bootstrapRange(modelScores, testY);
 const [ruleLo, ruleHi] = bootstrapRange(ruleScores, testY);
-console.log(`  AUC, logistic model:  ${auc(modelScores, testY).toFixed(3)} (95% range ${modelLo.toFixed(2)}–${modelHi.toFixed(2)})`);
-console.log(`  AUC, rule (usage drop): ${auc(ruleScores, testY).toFixed(3)} (95% range ${ruleLo.toFixed(2)}–${ruleHi.toFixed(2)})`);
+console.log(`  AUC, logistic model:  ${auc(modelScores, testY).toFixed(3)} (95% range ${modelLo.toFixed(2)} to ${modelHi.toFixed(2)})`);
+console.log(`  AUC, rule (usage drop): ${auc(ruleScores, testY).toFixed(3)} (95% range ${ruleLo.toFixed(2)} to ${ruleHi.toFixed(2)})`);
 
 // What a CSM actually sees: the top N per CSM, and how many leavers land there.
 function capturedInTopN(scores: number[]): number {

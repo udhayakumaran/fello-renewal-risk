@@ -82,8 +82,8 @@ export function esc(value: unknown): string {
 }
 
 const money = (n: number | null | undefined): string =>
-  n === null || n === undefined ? "–" : `$${Math.round(Number(n)).toLocaleString("en-US")}`;
-const pct = (p: number | null | undefined): string => (p === null || p === undefined ? "–" : `${(Number(p) * 100).toFixed(1)}%`);
+  n === null || n === undefined ? "n/a" : `$${Math.round(Number(n)).toLocaleString("en-US")}`;
+const pct = (p: number | null | undefined): string => (p === null || p === undefined ? "n/a" : `${(Number(p) * 100).toFixed(1)}%`);
 
 interface Reason {
   feature: string;
@@ -97,7 +97,7 @@ interface Reason {
 const BAND_LABEL: Record<Band, string> = { red: "Red", amber: "Amber", green: "Green" };
 
 function riskPill(p: number | null, rate: number): string {
-  if (p === null) return "<span class='muted'>–</span>";
+  if (p === null) return "<span class='muted'>n/a</span>";
   const band = bandOf(Number(p), rate);
   return `<span class="risk ${band}" title="${BAND_LABEL[band]} band">${pct(p)}</span>`;
 }
@@ -347,7 +347,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       );
       const scored = rows.filter((r) => r.probability !== null);
       const callRow = (r: (typeof rows)[number], rank: number | null): string => `<tr>
-          <td class="hide-sm"><span class="rank">${rank ?? "–"}</span></td>
+          <td class="hide-sm"><span class="rank">${rank ?? "n/a"}</span></td>
           <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2)}</div></td>
           <td class="num">${riskPill(r.probability, rate)}</td>
           <td class="num">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>

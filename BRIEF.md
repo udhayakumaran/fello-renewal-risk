@@ -6,7 +6,7 @@
 
 ## 1. The actual problem
 
-Each CSM owns about 120 accounts and has time for roughly 15–20 calls a week. Customer signals are spread across Salesforce, Zendesk, product events, Stripe and Gmail, so nobody sees the full picture for an account. Each Monday the CSM guesses who to call. The VP says two renewals were lost last quarter where the signals were already in the data.
+Each CSM owns about 120 accounts and has time for roughly 15 to 20 calls a week. Customer signals are spread across Salesforce, Zendesk, product events, Stripe and Gmail, so nobody sees the full picture for an account. Each Monday the CSM guesses who to call. The VP says two renewals were lost last quarter where the signals were already in the data.
 
 The real problem is not "we need a dashboard." It is: **every week, pick the few accounts that most need a call, and give the CSM the reasons, so the call time goes where it matters.** Two sub-problems:
 1. Combine the signals into one view per account, as of a given date.
@@ -59,7 +59,7 @@ Left out of the first slice: Gmail, automated emails beyond the card reminder, U
 
 ## 6. How we'll know it works
 
-- **Ranking beats the simple rule.** On a later time period than the training data, the model must put more of the accounts that actually left into each CSM's top 15–20 than a simple rule-based baseline does.
+- **Ranking beats the simple rule.** On a later time period than the training data, the model must put more of the accounts that actually left into each CSM's top 15 to 20 than a simple rule-based baseline does.
 - **Numbers are shown with ranges.** With about 10% of accounts leaving, small groups give noisy results, so confidence ranges are shown, not single numbers.
 - **Every number traces back.** A test checks that each reason on screen links to the stored source records.
 - **Reruns match.** Running the pipeline again on the same data gives the same scores.

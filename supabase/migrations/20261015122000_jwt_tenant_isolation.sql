@@ -1,7 +1,8 @@
--- Isolation now comes from a signed token, not from a session setting.
--- The Supabase API (PostgREST) verifies the token's signature, then exposes its claims through
--- auth.jwt(). The app cannot change a signed claim, so it cannot pick another org.
--- Direct Postgres connections have no verified token: auth.jwt() is null, so they see nothing.
+-- Isolation reads the org from auth.jwt(). Through the Supabase API (PostgREST) the token is
+-- verified by signature, so a caller cannot change its org. The CSM web app is different: it has no
+-- PostgREST token. It sets the same claims itself from its own signed session cookie (see
+-- src/db.ts asUser), so isolation there depends on that cookie check. See README "Tenancy".
+-- Direct Postgres connections without those claims: auth.jwt() is null, so they see nothing.
 
 do $$
 declare

@@ -17,7 +17,11 @@ export function ownerClient(): pg.Client {
   return new pg.Client({ connectionString: url });
 }
 
-/** Runs one query as the signed-in user: the database filters every row by the verified org claim. */
+/**
+ * Runs one query as the signed-in user. The claims passed in must come from the verified session
+ * cookie only (web/server.ts withSession). The database trusts whatever is set here, so the caller
+ * is the trust boundary.
+ */
 export async function asUser<T>(
   client: pg.ClientBase,
   claims: Record<string, unknown>,

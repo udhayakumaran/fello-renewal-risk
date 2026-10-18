@@ -148,7 +148,7 @@ function topReasons(reasons: Reason[], n: number, typical: Map<string, number>):
  * Rows are sorted from the ranking order each time, so equal values keep their rank (stable sort).
  * Missing values (data-sort empty) sort last in both directions.
  */
-const SORT_SCRIPT = `<script>
+export const SORT_SCRIPT = `<script>
 (() => {
   const ICON = { none: "↕", ascending: "▲", descending: "▼" };
   document.querySelectorAll("table.sortable").forEach((table) => {
@@ -185,26 +185,50 @@ const SORT_SCRIPT = `<script>
 </script>`;
 
 /**
- * Filters the call list by account name as you type. Hidden rows stay in the table,
- * so the column sort still works on the full list and the filter still applies after a sort.
+ * Filters every call-list group by account name as you type. Each group filters its own rows, so
+ * a match in Watch list never pulls a row into This week's calls. Hidden rows stay in the table,
+ * so the column sort still works on the full group and the filter still applies after a sort.
  */
-const SEARCH_SCRIPT = `<script>
+export const SEARCH_SCRIPT = `<script>
 (() => {
-  const input = document.getElementById("call-search");
-  const table = document.getElementById("calls-table");
-  const empty = document.getElementById("calls-empty");
+  const input = document.getElementById("account-search");
   input.addEventListener("input", () => {
     const query = input.value.trim().toLowerCase();
-    let shown = 0;
-    Array.from(table.tBodies[0].rows).forEach((row) => {
-      const match = row.cells[1].dataset.sort.toLowerCase().includes(query);
-      row.hidden = !match;
-      if (match) shown += 1;
+    document.querySelectorAll("[data-group]").forEach((group) => {
+      let shown = 0;
+      Array.from(group.querySelector("tbody").rows).forEach((row) => {
+        const match = row.querySelector("td.account").dataset.sort.toLowerCase().includes(query);
+        row.hidden = !match;
+        if (match) shown += 1;
+      });
+      group.querySelector("[data-no-match]").hidden = shown > 0;
     });
-    empty.hidden = shown > 0;
   });
 })();
 </script>`;
+
+/** The "How this list works" bullets as [label, text]. Numbers come from ranking.ts so they stay true. */
+export const HOW_LIST_WORKS: [string, string][] = [
+  ["What the percentage means", "Out of 100 customers that look like this one, about this many left at renewal."],
+  ["Why it is on the list", "The chips show what looks unusual next to a typical customer, such as more open support tickets than most."],
+  ["Money at risk", "The chance of leaving times the contract value. No contract value on file counts as $0."],
+  ["The order", `This week's calls are the ${CALL_CAPACITY} accounts with the most money at risk, biggest first. The watch list is next in line after them.`],
+  ["Recently contacted", `An account you contacted in the last ${CONTACT_WINDOW_DAYS} days is skipped, so it does not take one of those ${CALL_CAPACITY} spots.`],
+];
+
+/** One call-list group. Search hides rows inside it and shows the note when none match. */
+const groupWrap = (tableHtml: string): string =>
+  `<div class="group" data-group>${tableHtml}<div class="card empty" data-no-match hidden>No accounts in this group match that search.</div></div>`;
+
+const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending"): string =>
+  `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button></th>`;
+
+/** A sortable call table. Its rows are the only rows its sort touches, so groups never swap rows. */
+export function callTable(rows: string[]): string {
+  return groupWrap(
+    `<div class="table-wrap"><table class="sortable"><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`,
+  );
+}
 
 function page(title: string, body: string, session: Session | null): string {
   const nav = session
@@ -464,10 +488,6 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           <td class="date hide-sm" data-sort="${r.days_to_renewal}">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
           <td class="why-col">${topReasons(r.reasons, 3, typical)}</td>
         </tr>`;
-      const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending"): string =>
-        `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button></th>`;
-      const table = (list: string[], id = ""): string =>
-        `<div class="table-wrap"><table class="sortable"${id ? ` id="${id}"` : ""}><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
       const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
       const example = scored[0];
@@ -479,11 +499,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         <section class="callout how">
           <h2>How this list works</h2>
           <ul>
-            <li><strong>Chance of leaving in 90 days</strong> comes from a logistic model trained on past renewals. It weighs usage, support tickets, cancel or downgrade signals, tenure, contract value and inactive contacts into one probability.</li>
-            <li><strong>Why chips</strong> show this account's value next to the typical value, the average the model learned from past renewals.</li>
-            <li><strong>Money at risk</strong> = chance of leaving × contract value from the CRM. It is an expected value, not a forecast. No contract value counts as $0.</li>
-            <li><strong>Order and capacity:</strong> calls are the top ${CALL_CAPACITY} by money at risk, highest first, ties by account ID. The next accounts form the watch list. Unscored accounts are listed under Not scored, never as safe.</li>
-            <li><strong>Contact window:</strong> an account you contacted in the last ${CONTACT_WINDOW_DAYS} days is taken off the list before the cut, so it does not use a call slot.</li>
+            ${HOW_LIST_WORKS.map(([label, text]) => `<li><strong>${esc(label)}:</strong> ${esc(text)}</li>`).join("\n            ")}
           </ul>
           ${example ? `<p class="small">Full math for any account is on its page, for example <a href="/account/${esc(example.sf_id)}">${esc(example.company_name)}</a>.</p>` : ""}
         </section>
@@ -494,19 +510,18 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           <div class="card stat"><div class="label">Not scored</div><div class="value">${unknown.length}</div><div class="hint">Shown as unknown, never as safe</div></div>
         </div>
         <p class="small"><span class="risk red">Red</span> at least ${pctOf(2 * rate)} chance (twice the typical ${pctOf(rate)}) · <span class="risk amber">Amber</span> at least ${pctOf(rate)} · <span class="risk green">Green</span> below that. Bands are set from the model's training data and move when it is retrained.</p>
+        ${rows.length ? `<div class="search"><input id="account-search" type="search" placeholder="Search accounts" aria-label="Search accounts by name" autocomplete="off"></div>` : ""}
         <div class="section-head"><h2>This week's calls</h2><span class="muted small">Highest money at risk first</span></div>
-        ${top.length ? `<div class="search"><input id="call-search" type="search" placeholder="Search accounts" aria-label="Search accounts by name" autocomplete="off"></div>
-        ${table(top.map((r, i) => callRow(r, i + 1)), "calls-table")}
-        <div class="card empty" id="calls-empty" hidden>No accounts match that search.</div>` : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
+        ${top.length ? callTable(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
         <div class="section-head"><h2>Watch list</h2><span class="muted small">Next in line, after this week's calls</span></div>
-        ${watch.length ? table(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<div class='card empty'>Nothing else to watch.</div>"}
+        ${watch.length ? callTable(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<div class='card empty'>Nothing else to watch.</div>"}
         <div class="section-head"><h2>Contacted in the last ${CONTACT_WINDOW_DAYS} days</h2><span class="muted small">Off the call list until the window passes</span></div>
-        ${contacted.length ? table(contacted.map((r) => callRow(r, null))) : "<div class='card empty'>No recent contacts.</div>"}
+        ${contacted.length ? callTable(contacted.map((r) => callRow(r, null))) : "<div class='card empty'>No recent contacts.</div>"}
         <div class="section-head"><h2>Not scored</h2><span class="muted small">Shown as unknown with the reason, never as safe</span></div>
-        ${unknown.length ? `<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
-          .map((r) => `<tr><td class="account">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
-          .join("")}</tbody></table></div>` : "<div class='card empty'>Every renewal in the window is scored.</div>"}
-        ${SORT_SCRIPT}${top.length ? SEARCH_SCRIPT : ""}`;
+        ${unknown.length ? groupWrap(`<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
+          .map((r) => `<tr><td class="account" data-sort="${esc(r.company_name)}">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
+          .join("")}</tbody></table></div>`) : "<div class='card empty'>Every renewal in the window is scored.</div>"}
+        ${SORT_SCRIPT}${rows.length ? SEARCH_SCRIPT : ""}`;
     });
     res.type("html").send(page("My renewals", html, session));
   });

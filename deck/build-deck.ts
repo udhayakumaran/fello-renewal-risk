@@ -49,7 +49,7 @@ function slide(title: string, bullets: string[], opts: { note?: string } = {}): 
 
 // 2. The real problem
 slide("The real problem is limited call time, not a missing dashboard", [
-  "Each CSM owns about 120 accounts and can make 15–20 calls a week.",
+  "Each CSM owns about 120 accounts and can make 15 to 20 calls a week.",
   "Signals live in five systems, so nobody sees a customer's full picture.",
   "Two renewals were lost last quarter, and the signals were already in the data.",
   "Goal: each week, rank the renewals most likely to be lost, weighted by money, with the reasons.",
@@ -71,7 +71,7 @@ slide("What we built", [
   "Features only from what the system had received on the scoring date, so the model can't see the future.",
   "A logistic regression fit on past renewals, written by hand so every reason can be checked.",
   "A nightly job that publishes only when a whole org's run succeeds. A failed run is logged, never shown.",
-  "A CSM app with tenant isolation enforced in the database, not the app.",
+  "A CSM app with tenant isolation. The app's signed session cookie is the trust boundary; Postgres row-level security filters every query as defense in depth.",
 ]);
 
 // 5. What a CSM sees
@@ -118,7 +118,7 @@ slide("What we built", [
     { text: "Simple rule (usage drop)", options: { bold: true, color: MUTED } },
   ];
   const rows = [
-    ["AUC: 1.0 perfect, 0.5 coin flip (95% range)", "0.71 (0.65–0.85)", "0.60 (0.51–0.69)"],
+    ["AUC: 1.0 perfect, 0.5 coin flip (95% range)", "0.71 (0.65 to 0.85)", "0.60 (0.51 to 0.69)"],
     ["Leavers in each CSM's top 15 (of 29)", "18", "12"],
   ];
   s.addTable([header, ...rows.map((r) => r.map((c) => ({ text: c })))], {
@@ -136,7 +136,7 @@ slide("What we built", [
 
 // 8. Safety
 slide("What the system does on its own, and what it never does", [
-  "Runs nightly without anyone starting it. Verified: a scheduled run fired and published on its own.",
+  "Runs nightly on a Vercel Cron schedule (02:00 IST), without anyone starting it.",
   "Publishes an org only when all its steps succeed. A forced failure left the last good run in place.",
   "Customer email: only the card-update reminder. Never a churn or check-in email.",
   "Opted-out customers get no reminder. Accounts a CSM contacted in the last 14 days get their alert marked suppressed.",
@@ -155,10 +155,11 @@ slide("What the business still has to confirm", [
 // 10. 10x and next
 slide("What breaks first at 10x, and the next steps", [
   "1. The nightly job rescans everything in memory. Needs incremental features and a queue per org.",
-  "2. One scheduler process. A second copy would double-run. Needs a lock per org.",
+  "2. The nightly run has no lock. Overlapping runs can send duplicate card reminders. Needs an advisory lock per org.",
   "3. Row-level checks on a large event table need partitioning by org and month.",
   "4. Alerts from old runs pile up. Close them when a newer run publishes.",
-  "Next: deploy to a host (needs your choice and approval), connect real sources, and measure whether calls work.",
+  "Live demo: https://fello-renewal-risk.vercel.app/",
+  "Loom walkthrough: LINK_TBD",
 ]);
 
 const out = join(root, "docs");

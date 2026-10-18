@@ -184,6 +184,28 @@ const SORT_SCRIPT = `<script>
 })();
 </script>`;
 
+/**
+ * Filters the call list by account name as you type. Hidden rows stay in the table,
+ * so the column sort still works on the full list and the filter still applies after a sort.
+ */
+const SEARCH_SCRIPT = `<script>
+(() => {
+  const input = document.getElementById("call-search");
+  const table = document.getElementById("calls-table");
+  const empty = document.getElementById("calls-empty");
+  input.addEventListener("input", () => {
+    const query = input.value.trim().toLowerCase();
+    let shown = 0;
+    Array.from(table.tBodies[0].rows).forEach((row) => {
+      const match = row.cells[1].dataset.sort.toLowerCase().includes(query);
+      row.hidden = !match;
+      if (match) shown += 1;
+    });
+    empty.hidden = shown > 0;
+  });
+})();
+</script>`;
+
 function page(title: string, body: string, session: Session | null): string {
   const nav = session
     ? `<header class="top">
@@ -282,6 +304,7 @@ th[aria-sort]:not([aria-sort="none"]) .sort-btn { color: var(--fg); }
 .empty { padding: 28px; text-align: center; color: var(--muted); }
 .callout { padding: 14px 16px; background: var(--accent-soft); border-radius: 10px; color: var(--fg); margin: 14px 0; }
 .explain { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.search { margin: 0 0 10px; } .search input { width: 100%; max-width: 360px; }
 
 /* buttons and forms */
 button, .button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
@@ -321,6 +344,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   .top { padding: 10px 12px; gap: 10px; flex-wrap: wrap; } .top nav { order: 3; width: 100%; }
   .who small { display: none; }
   .stat .value { font-size: 20px; }
+  .search input { max-width: none; }
   th, td { padding: 10px 6px; }
   td.num { white-space: nowrap; }
   th.num { white-space: normal; }
@@ -442,8 +466,8 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         </tr>`;
       const sortHead = (label: string, cls: string, type: "text" | "number", first: "ascending" | "descending"): string =>
         `<th class="${cls}" aria-sort="none" data-type="${type}" data-first="${first}"><button type="button" class="sort-btn">${label}<span class="sort-icon" aria-hidden="true">↕</span></button></th>`;
-      const table = (list: string[]): string =>
-        `<div class="table-wrap"><table class="sortable"><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
+      const table = (list: string[], id = ""): string =>
+        `<div class="table-wrap"><table class="sortable"${id ? ` id="${id}"` : ""}><thead><tr><th class="hide-sm">#</th>${sortHead("Account", "", "text", "ascending")}${sortHead("Chance of leaving", "num", "number", "descending")}${sortHead("Money at risk", "num", "number", "descending")}${sortHead("Renewal", "hide-sm", "number", "ascending")}<th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
       const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
       const example = scored[0];
@@ -471,7 +495,9 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         </div>
         <p class="small"><span class="risk red">Red</span> at least ${pctOf(2 * rate)} chance (twice the typical ${pctOf(rate)}) · <span class="risk amber">Amber</span> at least ${pctOf(rate)} · <span class="risk green">Green</span> below that. Bands are set from the model's training data and move when it is retrained.</p>
         <div class="section-head"><h2>This week's calls</h2><span class="muted small">Highest money at risk first</span></div>
-        ${top.length ? table(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
+        ${top.length ? `<div class="search"><input id="call-search" type="search" placeholder="Search accounts" aria-label="Search accounts by name" autocomplete="off"></div>
+        ${table(top.map((r, i) => callRow(r, i + 1)), "calls-table")}
+        <div class="card empty" id="calls-empty" hidden>No accounts match that search.</div>` : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
         <div class="section-head"><h2>Watch list</h2><span class="muted small">Next in line, after this week's calls</span></div>
         ${watch.length ? table(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<div class='card empty'>Nothing else to watch.</div>"}
         <div class="section-head"><h2>Contacted in the last ${CONTACT_WINDOW_DAYS} days</h2><span class="muted small">Off the call list until the window passes</span></div>
@@ -480,7 +506,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         ${unknown.length ? `<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
           .map((r) => `<tr><td class="account">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
           .join("")}</tbody></table></div>` : "<div class='card empty'>Every renewal in the window is scored.</div>"}
-        ${SORT_SCRIPT}`;
+        ${SORT_SCRIPT}${top.length ? SEARCH_SCRIPT : ""}`;
     });
     res.type("html").send(page("My renewals", html, session));
   });

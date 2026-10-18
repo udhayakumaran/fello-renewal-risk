@@ -15,12 +15,12 @@ import { buildSnapshot, FEATURE_NAMES, horizonFor, nextRenewal, observedLeft, un
 import { buildIdentity, type Identity } from "../identity.js";
 import { indexSources, type SourceIndex } from "../index-sources.js";
 import { fitLogistic, type Model, predict } from "../model.js";
+import { CONTACT_WINDOW_DAYS, splitCalls } from "../ranking.js";
 import { insertMany } from "../db/batch.js";
 import { loadOrgRaw, orgIds } from "./source-db.js";
 
 const WINDOW_DAYS = 90;
-const CALL_CAPACITY = 15; // calls one CSM can make in a week
-const CONTACT_WINDOW_DAYS = 14;
+const CARD_REMINDER_DAYS = 14; // no second card reminder to the same customer inside this window
 const TRAIN_CUTS = [
   "2024-06-15", "2024-09-15", "2024-12-15", "2025-03-15", "2025-06-15",
   "2025-09-15", "2025-12-15", "2026-03-15", "2026-06-15", "2026-07-15",
@@ -224,7 +224,10 @@ async function runOrg(
   }
 }
 
-/** Top calls per CSM. Suppressed when the CSM already reached out in the last 14 days. */
+/**
+ * This week's calls per CSM. Accounts contacted in the last 14 days are left out before the top 15
+ * is cut, so a recent contact never uses up a call slot. Same rule as the CSM page (ranking.ts).
+ */
 async function writeAlerts(client: pg.Client, orgId: string, runId: string, rows: ScoredRow[], asOf: string): Promise<void> {
   const contacted = new Set(
     (
@@ -236,17 +239,15 @@ async function writeAlerts(client: pg.Client, orgId: string, runId: string, rows
   );
   const byOwner = new Map<string, ScoredRow[]>();
   for (const r of rows) {
-    if (r.probability === null) continue;
     byOwner.set(r.owner, [...(byOwner.get(r.owner) ?? []), r]);
   }
   const alertRows: unknown[][] = [];
   for (const list of byOwner.values()) {
-    list.sort((a, b) => (b.moneyAtRisk ?? 0) - (a.moneyAtRisk ?? 0));
-    for (const r of list.slice(0, CALL_CAPACITY)) {
-      const suppressed = contacted.has(r.sfId);
-      alertRows.push([orgId, runId, r.sfId, r.owner, "csm_review", suppressed ? "suppressed" : "open",
-        suppressed ? "CSM contacted recently" : null]);
-    }
+    const { calls } = splitCalls(
+      list.map((r) => ({ ...r, id: r.sfId, money: r.moneyAtRisk })),
+      contacted,
+    );
+    for (const r of calls) alertRows.push([orgId, runId, r.sfId, r.owner, "csm_review", "open", null]);
   }
   await insertMany(client, "alerts", ["org_id", "run_id", "sf_id", "owner_csm_id", "alert_type", "status", "suppressed_reason"], alertRows);
 }
@@ -263,7 +264,7 @@ async function writeCardReminders(client: pg.Client, org: OrgData, asOf: string)
     (
       await client.query(
         "select sf_id from card_reminders where org_id = $1 and sent_at > ($2::date - $3::int)",
-        [org.orgId, asOf, CONTACT_WINDOW_DAYS],
+        [org.orgId, asOf, CARD_REMINDER_DAYS],
       )
     ).rows.map((r: { sf_id: string }) => r.sf_id),
   );
@@ -271,7 +272,7 @@ async function writeCardReminders(client: pg.Client, org: OrgData, asOf: string)
     if (optedOut.has(sfId) || recent.has(sfId)) continue;
     const failed = invoices.find((i) => {
       const sent = (i["sent_at"] ?? "").slice(0, 10);
-      return i["status"] === "failed" && sent > daysAgo(asOf, CONTACT_WINDOW_DAYS) && sent <= asOf;
+      return i["status"] === "failed" && sent > daysAgo(asOf, CARD_REMINDER_DAYS) && sent <= asOf;
     });
     if (!failed) continue;
     await client.query(

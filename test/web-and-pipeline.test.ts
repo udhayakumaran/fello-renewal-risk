@@ -80,6 +80,24 @@ test("a session from org_a cannot open an org_b account", { skip }, async () => 
   assert.ok(!response.body.includes(sfId), "the page must not reveal the account");
 });
 
+test("claims come from the signed cookie: org_a with an org_b CSM sees no org_b account", { skip }, async () => {
+  // A validly signed cookie whose org and CSM disagree. The org claim decides what the database returns.
+  const cookie = `csm_session=${encodeURIComponent(makeCookie({ org: "org_a", csm: "org_b-CSM1" }, secret))}`;
+  const other = await owner.query("select sf_id from sf_accounts where org_id = 'org_b' and owner_csm_id = 'org_b-CSM1' limit 1");
+  const sfId = other.rows[0]?.sf_id as string;
+  const response = await get(`/account/${sfId}`, cookie);
+  assert.equal(response.status, 404);
+  const list = await get("/", cookie);
+  assert.ok(!list.body.includes(sfId), "org_b records must not appear for an org_a session");
+});
+
+test("an expired session cookie is refused over HTTP", { skip }, async () => {
+  const expired = `csm_session=${encodeURIComponent(makeCookie({ org: "org_a", csm: "org_a-CSM1" }, secret, -1000))}`;
+  const response = await get("/", expired);
+  assert.equal(response.status, 302);
+  assert.equal(response.location, "/login");
+});
+
 test("every stored score can be recomputed from its stored reasons", { skip }, async () => {
   const published = (await owner.query("select p.run_id, r.model_id from published_runs p join runs r using (run_id) where p.org_id = 'org_a'")).rows[0];
   const model = (await owner.query("select bias from models where model_id = $1", [published.model_id])).rows[0];

@@ -6,6 +6,8 @@ import { buildIdentity } from "../src/identity.js";
 import { indexSources } from "../src/index-sources.js";
 import type { RawData } from "../src/load.js";
 import { auc, fitLogistic, predict } from "../src/model.js";
+import { baseRate, bandOf, splitCalls } from "../src/ranking.js";
+import { makeCookie, readCookie } from "../src/web/server.js";
 
 const sfRow = (overrides: Partial<CsvRow>): CsvRow => ({
   sf_id: "SF1",
@@ -54,4 +56,42 @@ test("logistic model: ranks a separable case perfectly and gives sensible probab
   assert.equal(auc(scores, y), 1);
   assert.ok((scores[0] ?? 1) < 0.5, "low value should be below 50%");
   assert.ok((scores[5] ?? 0) > 0.5, "high value should be above 50%");
+});
+
+const cand = (id: string, money: number | null, probability: number | null = 0.05) => ({ id, money, probability });
+
+test("calls: a contacted account leaves the list before the cut, so its slot goes to the next one", () => {
+  const rows = [cand("A", 900), cand("B", 800), cand("C", 700), cand("D", 600)];
+  const { calls, watch, contacted } = splitCalls(rows, new Set(["A"]), 2);
+  assert.deepEqual(calls.map((r) => r.id), ["B", "C"]);
+  assert.deepEqual(watch.map((r) => r.id), ["D"]);
+  assert.deepEqual(contacted.map((r) => r.id), ["A"]);
+});
+
+test("calls: highest money first, unscored rows never appear, nulls sort last", () => {
+  const rows = [cand("X", null), cand("Y", 100), cand("Z", 300, null), cand("W", 200)];
+  const { calls, watch } = splitCalls(rows, new Set(), 15);
+  assert.deepEqual(calls.map((r) => r.id), ["W", "Y", "X"]);
+  assert.equal(watch.length, 0);
+});
+
+test("bands: red at twice the base rate, amber at the base rate, green below", () => {
+  const rate = baseRate(379, 16415); // the training base rate the local model reports
+  assert.ok(Math.abs(rate - 0.0231) < 0.0001);
+  assert.equal(bandOf(2 * rate, rate), "red");
+  assert.equal(bandOf(rate, rate), "amber");
+  assert.equal(bandOf(rate * 0.99, rate), "green");
+  assert.equal(baseRate(0, 0), 0);
+});
+
+test("session cookie: a valid one is read back; an expired or tampered one is refused", () => {
+  const secret = "test-secret-for-cookie-checks-000";
+  const live = makeCookie({ org: "org_a", csm: "org_a-CSM1" }, secret);
+  assert.deepEqual(readCookie(live, secret), { org: "org_a", csm: "org_a-CSM1" });
+  const expired = makeCookie({ org: "org_a", csm: "org_a-CSM1" }, secret, -1000);
+  assert.equal(readCookie(expired, secret), null);
+  const [payload, mac] = live.split(".");
+  const widened = Buffer.from(JSON.stringify({ org: "org_b", csm: "org_b-CSM1", exp: Date.now() + 60_000 })).toString("base64url");
+  assert.equal(readCookie(`${widened}.${mac}`, secret), null, "changing the payload breaks the signature");
+  assert.ok(payload);
 });

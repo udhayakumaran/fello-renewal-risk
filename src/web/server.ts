@@ -1,6 +1,12 @@
 /**
- * CSM web app. Every page reads through the database as the signed-in user, so isolation is
- * enforced by Postgres row-level security, not by filtering in this file.
+ * CSM web app. Every page reads through the database as the signed-in user: the org and CSM come
+ * from the session cookie, and Postgres row-level security filters every query by them. Isolation
+ * is only as good as that cookie check, so it is kept strict: HMAC signature, expiry, and claims
+ * set from the verified session only (see withSession and db.ts asUser).
+ *
+ * Trust boundary: this app verifies the cookie and then sets the database claims itself. That is
+ * not the same as a token the database verifies. A bug in this file that sets the wrong claims
+ * would widen access. The tests in test/ cover the cases that matter.
  *
  * Login here is a development stand-in: pick an org and a CSM. A real deployment would use the
  * company's sign-in (Supabase Auth or SSO) and issue the same org claim.
@@ -10,6 +16,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import express from "express";
 import type pg from "pg";
 import { asUser, webPool } from "../db.js";
+import { baseRate, bandOf, type Band, CONTACT_WINDOW_DAYS, CALL_CAPACITY, splitCalls } from "../ranking.js";
 
 export interface Session {
   org: string;
@@ -17,7 +24,7 @@ export interface Session {
 }
 
 const COOKIE = "csm_session";
-const CALL_CAPACITY = 15;
+const SESSION_MS = 12 * 60 * 60 * 1000; // sign-in lasts half a working day
 
 // ---------- signed session cookie ----------
 
@@ -25,8 +32,9 @@ function sign(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("base64url");
 }
 
-export function makeCookie(session: Session, secret: string): string {
-  const payload = Buffer.from(JSON.stringify(session)).toString("base64url");
+/** Signed cookie: base64url(JSON with org, csm and exp in ms) + "." + HMAC. ttlMs is for tests. */
+export function makeCookie(session: Session, secret: string, ttlMs = SESSION_MS): string {
+  const payload = Buffer.from(JSON.stringify({ ...session, exp: Date.now() + ttlMs })).toString("base64url");
   return `${payload}.${sign(payload, secret)}`;
 }
 
@@ -45,8 +53,9 @@ export function readCookie(value: string | undefined, secret: string): Session |
   const given = Buffer.from(mac);
   if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
   try {
-    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Partial<Session>;
-    return typeof parsed.org === "string" && typeof parsed.csm === "string" ? { org: parsed.org, csm: parsed.csm } : null;
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Partial<Session> & { exp?: number };
+    const live = typeof parsed.exp === "number" && parsed.exp > Date.now();
+    return live && typeof parsed.org === "string" && typeof parsed.csm === "string" ? { org: parsed.org, csm: parsed.csm } : null;
   } catch {
     return null;
   }
@@ -85,10 +94,12 @@ interface Reason {
   sources: { ids: string[]; count: number };
 }
 
-function riskPill(p: number | null): string {
+const BAND_LABEL: Record<Band, string> = { red: "Red", amber: "Amber", green: "Green" };
+
+function riskPill(p: number | null, rate: number): string {
   if (p === null) return "<span class='muted'>–</span>";
-  const tone = Number(p) >= 0.04 ? "high" : Number(p) >= 0.02 ? "mid" : "low";
-  return `<span class="risk ${tone}">${pct(p)}</span>`;
+  const band = bandOf(Number(p), rate);
+  return `<span class="risk ${band}" title="${BAND_LABEL[band]} band">${pct(p)}</span>`;
 }
 
 function topReasons(reasons: Reason[], n: number): string {
@@ -169,9 +180,9 @@ td.date { white-space: nowrap; }
 td.account a { font-weight: 600; color: var(--fg); } td.account a:hover { color: var(--accent); }
 .rank { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--chip); color: var(--chip-fg); font-size: 12px; font-weight: 600; }
 .risk { display: inline-block; min-width: 64px; text-align: center; padding: 3px 9px; border-radius: 999px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.risk.high { background: var(--bad-soft); color: var(--bad); }
-.risk.mid { background: var(--warn-soft); color: var(--warn); }
-.risk.low { background: var(--ok-soft); color: var(--ok); }
+.risk.red { background: var(--bad-soft); color: var(--bad); }
+.risk.amber { background: var(--warn-soft); color: var(--warn); }
+.risk.green { background: var(--ok-soft); color: var(--ok); }
 .chip { display: inline-block; background: var(--chip); color: var(--chip-fg); border-radius: 999px; padding: 2px 9px; font-size: 12px; margin: 2px 4px 2px 0; white-space: nowrap; }
 .why-inline { display: none; } .why-inline .chip { font-size: 11.5px; white-space: normal; max-width: 100%; text-align: left; }
 .chip.done { background: var(--ok-soft); color: var(--ok); }
@@ -295,7 +306,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       res.redirect("/login");
       return;
     }
-    res.setHeader("Set-Cookie", `${COOKIE}=${encodeURIComponent(makeCookie({ org, csm }, secret))}; HttpOnly; SameSite=Strict; Path=/`);
+    res.setHeader("Set-Cookie", `${COOKIE}=${encodeURIComponent(makeCookie({ org, csm }, secret))}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}`);
     res.redirect("/");
   });
 
@@ -322,44 +333,49 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           [published.run_id, session.csm],
         )
       ).rows as { sf_id: string; company_name: string; probability: number | null; money_at_risk: string | null; renewal_date: string | null; days_to_renewal: number; unknown_reason: string | null; reasons: Reason[] }[];
-      const alerts = new Map(
-        (await c.query("select sf_id, status, suppressed_reason from alerts where run_id = $1 and owner_csm_id = $2", [published.run_id, session.csm]))
-          .rows.map((a: { sf_id: string; status: string; suppressed_reason: string | null }) => [a.sf_id, a]),
+      const model = (await c.query("select training_leavers, training_rows from models where model_id = $1", [published.model_id])).rows[0];
+      const rate = baseRate(Number(model?.training_leavers ?? 0), Number(model?.training_rows ?? 0));
+      const contactedIds = new Set(
+        (await c.query("select distinct sf_id from csm_actions where action_date > current_date - $1::int", [CONTACT_WINDOW_DAYS]))
+          .rows.map((r: { sf_id: string }) => r.sf_id),
       );
 
-      const scored = rows.filter((r) => r.probability !== null);
       const unknown = rows.filter((r) => r.probability === null);
-      const callRow = (r: (typeof rows)[number], rank: number): string => {
-        const alert = alerts.get(r.sf_id);
-        const handled = alert?.status === "suppressed" ? "<span class='chip done'>Already contacted</span>" : "";
-        return `<tr>
-          <td class="hide-sm"><span class="rank">${rank}</span></td>
-          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a>${handled ? `<br>${handled}` : ""}<div class="why-inline">${topReasons(r.reasons, 2)}</div></td>
-          <td class="num">${riskPill(r.probability)}</td>
+      const { calls: top, watch, contacted } = splitCalls(
+        rows.map((r) => ({ ...r, id: r.sf_id, money: r.money_at_risk === null ? null : Number(r.money_at_risk) })),
+        contactedIds,
+      );
+      const scored = rows.filter((r) => r.probability !== null);
+      const callRow = (r: (typeof rows)[number], rank: number | null): string => `<tr>
+          <td class="hide-sm"><span class="rank">${rank ?? "–"}</span></td>
+          <td class="account"><a href="/account/${esc(r.sf_id)}">${esc(r.company_name)}</a><div class="why-inline">${topReasons(r.reasons, 2)}</div></td>
+          <td class="num">${riskPill(r.probability, rate)}</td>
           <td class="num">${money(r.money_at_risk === null ? null : Number(r.money_at_risk))}</td>
           <td class="date hide-sm">${esc(r.renewal_date ?? "unknown")}<br><span class="muted small">${r.days_to_renewal} days</span></td>
           <td class="why-col">${topReasons(r.reasons, 3)}</td>
         </tr>`;
-      };
       const table = (list: string[]): string =>
         `<div class="table-wrap"><table><thead><tr><th class="hide-sm">#</th><th>Account</th><th class="num">Chance of leaving</th><th class="num">Money at risk</th><th class="hide-sm">Renewal</th><th class="why-col">Why</th></tr></thead><tbody>${list.join("")}</tbody></table></div>`;
 
-      const top = scored.slice(0, CALL_CAPACITY);
-      const watch = scored.slice(CALL_CAPACITY);
       const callMoney = top.reduce((sum, r) => sum + Number(r.money_at_risk ?? 0), 0);
+      // Two decimals, so a pill at the line is never shown as on the wrong side of it.
+      const pctOf = (x: number): string => `${(x * 100).toFixed(2)}%`;
       return `${banner}
         <h1>Renewals to work this week</h1>
         <p class="lede small">Scored ${esc(published.as_of)} · model ${esc(published.model_id)} · <a href="/runs">run log</a></p>
         <div class="stats">
-          <div class="card stat"><div class="label">Calls to make</div><div class="value">${top.length}</div><div class="hint">Top ${CALL_CAPACITY} by money at risk</div></div>
+          <div class="card stat"><div class="label">Calls to make</div><div class="value">${top.length}</div><div class="hint">Top ${CALL_CAPACITY} by money at risk, not contacted in ${CONTACT_WINDOW_DAYS} days</div></div>
           <div class="card stat"><div class="label">Money at risk on those calls</div><div class="value">${money(callMoney)}</div><div class="hint">Chance of leaving × contract value</div></div>
           <div class="card stat"><div class="label">Renewals scored</div><div class="value">${scored.length}</div><div class="hint">Next 90 days</div></div>
           <div class="card stat"><div class="label">Not scored</div><div class="value">${unknown.length}</div><div class="hint">Shown as unknown, never as safe</div></div>
         </div>
+        <p class="small"><span class="risk red">Red</span> at least ${pctOf(2 * rate)} chance (twice the typical ${pctOf(rate)}) · <span class="risk amber">Amber</span> at least ${pctOf(rate)} · <span class="risk green">Green</span> below that. Bands are set from the model's training data and move when it is retrained.</p>
         <div class="section-head"><h2>This week's calls</h2><span class="muted small">Highest money at risk first</span></div>
-        ${top.length ? table(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No renewals in the next 90 days.</div>"}
+        ${top.length ? table(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
         <div class="section-head"><h2>Watch list</h2><span class="muted small">Next in line, after this week's calls</span></div>
         ${watch.length ? table(watch.map((r, i) => callRow(r, CALL_CAPACITY + i + 1))) : "<div class='card empty'>Nothing else to watch.</div>"}
+        <div class="section-head"><h2>Contacted in the last ${CONTACT_WINDOW_DAYS} days</h2><span class="muted small">Off the call list until the window passes</span></div>
+        ${contacted.length ? table(contacted.map((r) => callRow(r, null))) : "<div class='card empty'>No recent contacts.</div>"}
         <div class="section-head"><h2>Not scored</h2><span class="muted small">Shown as unknown with the reason, never as safe</span></div>
         ${unknown.length ? `<div class="table-wrap"><table><thead><tr><th>Account</th><th>Renewal</th><th>Reason</th></tr></thead><tbody>${unknown
           .map((r) => `<tr><td class="account">${esc(r.company_name)}</td><td class="date">${esc(r.renewal_date ?? "unknown")} <span class="muted small">(${r.days_to_renewal} days)</span></td><td><span class="chip">${esc(r.unknown_reason)}</span></td></tr>`)
@@ -379,6 +395,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       ).rows[0];
       if (!row) return null;
       const model = (await c.query("select * from models where model_id = $1", [published.model_id])).rows[0];
+      const accountRate = baseRate(Number(model?.training_leavers ?? 0), Number(model?.training_rows ?? 0));
       const reminders = (await c.query("select invoice_id, sent_at from card_reminders where sf_id = $1 order by sent_at desc limit 5", [sfId])).rows;
       const contacted = (await c.query("select action_date from csm_actions where sf_id = $1 order by action_date desc limit 1", [sfId])).rows[0];
 
@@ -398,7 +415,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       return `<p class="small"><a href="/">← This week’s calls</a></p>
         <div class="account-head"><h1>${esc(row.company_name)}</h1>${contacted ? `<span class="chip done">Last contact ${esc(contacted.action_date)}</span>` : ""}</div>
         <div class="stats">
-          <div class="card stat"><div class="label">Chance of leaving in 90 days</div><div class="value">${pct(row.probability)}</div></div>
+          <div class="card stat"><div class="label">Chance of leaving in 90 days</div><div class="value">${pct(row.probability)}</div><div class="hint"><span class="risk ${bandOf(Number(row.probability), accountRate)}">${BAND_LABEL[bandOf(Number(row.probability), accountRate)]} band</span></div></div>
           <div class="card stat"><div class="label">Money at risk</div><div class="value">${money(Number(row.money_at_risk))}</div></div>
           <div class="card stat"><div class="label">Renewal</div><div class="value">${esc(row.renewal_date ?? "unknown")}</div><div class="hint">${row.days_to_renewal} days away</div></div>
         </div>

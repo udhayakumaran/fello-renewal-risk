@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CsvRow } from "../src/csv.js";
+import { buildEvidence, describeRate } from "../src/evidence.js";
 import { buildSnapshot, FEATURE_NAMES } from "../src/features.js";
+import { needsRelearn } from "../src/pipeline/nightly.js";
 import { buildIdentity } from "../src/identity.js";
 import { indexSources } from "../src/index-sources.js";
 import type { RawData } from "../src/load.js";
@@ -109,4 +111,27 @@ test("reason chips show this account's value next to the typical one", () => {
   assert.equal(reasonDetail(reason("inactive_contact_share", "Some contacts marked inactive", 0.5), typical.get("inactive_contact_share")), "Some contacts marked inactive: 50% vs typical 25%");
   assert.equal(reasonDetail(reason("tickets_open", "Support tickets still open", 9), undefined), "Support tickets still open: 9");
   assert.equal(reasonDetail(reason("log_contract_value", "Contract value ($)", 1), typical.get("log_contract_value")), "Contract value: not in CRM");
+});
+
+test("evidence: counts leavers with and without a clue, and skips clues with no simple level", () => {
+  const at = (name: (typeof FEATURE_NAMES)[number]): number => FEATURE_NAMES.indexOf(name);
+  const row = (cancel: number): number[] => FEATURE_NAMES.map((n) => (n === "cancel_warning_120d" ? cancel : 0));
+  // 4 customers asked to cancel (3 left), 6 did not (1 left).
+  const X = [row(1), row(1), row(1), row(1), row(0), row(0), row(0), row(0), row(0), row(0)];
+  const y = [true, true, true, false, true, false, false, false, false, false];
+  const e = buildEvidence(X, y);
+  assert.deepEqual(e["cancel_warning_120d"]?.present, { left: 3, total: 4 });
+  assert.deepEqual(e["cancel_warning_120d"]?.absent, { left: 1, total: 6 });
+  assert.equal(e["log_contract_value"], undefined);
+  assert.equal(at("cancel_warning_120d") >= 0, true);
+  assert.equal(describeRate({ left: 22, total: 39 }), "56 in 100 left (22 of 39)");
+  assert.equal(describeRate({ left: 66, total: 4240 }), "1.6 in 100 left (66 of 4,240)");
+  assert.equal(describeRate({ left: 0, total: 0 }), "no cases");
+});
+
+test("re-learning: monthly, and immediately when there is no saved model", () => {
+  assert.equal(needsRelearn(null, "2026-10-19"), true);
+  assert.equal(needsRelearn("2026-10-19", "2026-10-19"), false);
+  assert.equal(needsRelearn("2026-09-20", "2026-10-19"), false); // 29 days
+  assert.equal(needsRelearn("2026-09-19", "2026-10-19"), true); // 30 days
 });

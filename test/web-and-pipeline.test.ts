@@ -127,3 +127,22 @@ test("a failed run is logged and never published", { skip }, async () => {
   assert.equal(failed?.status, "failed");
   assert.match(String(failed?.error), /FORCE_FAIL/);
 });
+
+test("the account page shows what happened to past customers, in plain words", { skip }, async () => {
+  const published = (await owner.query("select p.run_id from published_runs p where p.org_id = 'org_a'")).rows[0];
+  const row = (await owner.query("select sf_id, owner_csm_id from scores where run_id = $1 and probability is not null limit 1", [published.run_id])).rows[0];
+  const response = await get(`/account/${row.sf_id}`, cookieFor("org_a", row.owner_csm_id));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /In past data/);
+  assert.match(response.body, /With it: .* in 100 left \(\d+ of \d+\)/);
+  assert.doesNotMatch(response.body, /bias|Weight/);
+});
+
+test("a second run on the same day reuses the saved points instead of re-learning", { skip }, async () => {
+  const asOf = process.env["AS_OF"] ?? new Date().toISOString().slice(0, 10);
+  const before = (await owner.query("select model_id, trained_at from models where model_id = $1", [`logit-${asOf}`])).rows[0];
+  assert.ok(before, "the earlier nightly run saved a model");
+  await runNightly(asOf);
+  const after = (await owner.query("select model_id, trained_at from models where model_id = $1", [`logit-${asOf}`])).rows[0];
+  assert.equal(String(after.trained_at), String(before.trained_at), "model must not be re-learned the same day");
+});

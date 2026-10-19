@@ -7,9 +7,11 @@
  *   npm run nightly                       run once for today (or AS_OF=YYYY-MM-DD)
  *   npm run nightly -- --at 02:00         run every day at 02:00 (local time)
  *   FORCE_FAIL=<org_id> npm run nightly   simulate a failure for one org, to show the run log
+ *   RELEARN=1 npm run nightly             re-learn the points now instead of reusing the saved ones
  */
 import type pg from "pg";
 import { ownerClient } from "../db.js";
+import { buildEvidence, type Evidence } from "../evidence.js";
 import { LABELS, sourceIdsFor } from "../explain.js";
 import { buildSnapshot, FEATURE_NAMES, horizonFor, nextRenewal, observedLeft, unknownReason } from "../features.js";
 import { buildIdentity, type Identity } from "../identity.js";
@@ -20,6 +22,7 @@ import { insertMany } from "../db/batch.js";
 import { loadOrgRaw, orgIds } from "./source-db.js";
 
 const WINDOW_DAYS = 90;
+const MODEL_MAX_AGE_DAYS = 30; // the points per clue are re-learned monthly; other nights reuse them
 const CARD_REMINDER_DAYS = 14; // no second card reminder to the same customer inside this window
 const TRAIN_CUTS = [
   "2024-06-15", "2024-09-15", "2024-12-15", "2025-03-15", "2025-06-15",
@@ -39,6 +42,8 @@ interface Reason {
   weight: number;
   contribution: number;
   sources: { ids: string[]; count: number };
+  /** What happened to past customers with and without this clue. Absent for clues with no natural level. */
+  evidence?: Evidence;
 }
 
 interface ScoredRow {
@@ -90,7 +95,7 @@ function trainingSet(orgs: OrgData[], asOf: string): { X: number[][]; y: boolean
   return { X, y };
 }
 
-function explain(model: Model, x: number[], sfId: string, org: OrgData, asOf: string): Reason[] {
+function explain(model: Model, x: number[], sfId: string, org: OrgData, asOf: string, evidence: Record<string, Evidence>): Reason[] {
   return FEATURE_NAMES.map((feature, j) => {
     const weight = model.weights[j] ?? 0;
     const z = ((x[j] ?? 0) - (model.mean[j] ?? 0)) / (model.scale[j] ?? 1);
@@ -102,11 +107,12 @@ function explain(model: Model, x: number[], sfId: string, org: OrgData, asOf: st
       weight: round(weight, 4),
       contribution: round(weight * z, 4),
       sources: sourceIdsFor(feature, sfId, org.idx, asOf),
+      ...(evidence[feature] ? { evidence: evidence[feature] } : {}),
     };
   }).sort((a, b) => b.contribution - a.contribution);
 }
 
-function scoreOrg(org: OrgData, model: Model, asOf: string): ScoredRow[] {
+function scoreOrg(org: OrgData, model: Model, asOf: string, evidence: Record<string, Evidence>): ScoredRow[] {
   const rows: ScoredRow[] = [];
   const snap = buildSnapshot(org.identity.canonical, org.idx, asOf);
   const scored = new Set<string>();
@@ -130,7 +136,7 @@ function scoreOrg(org: OrgData, model: Model, asOf: string): ScoredRow[] {
       probability: round(probability, 4),
       moneyAtRisk: value === null ? null : round(probability * value, 2),
       unknownReason: null,
-      reasons: explain(model, x, id, org, asOf),
+      reasons: explain(model, x, id, org, asOf, evidence),
     });
   });
 
@@ -158,16 +164,63 @@ function scoreOrg(org: OrgData, model: Model, asOf: string): ScoredRow[] {
   return rows;
 }
 
-async function saveModel(client: pg.Client, modelId: string, model: Model, rows: number, leavers: number): Promise<void> {
+async function saveModel(
+  client: pg.Client,
+  modelId: string,
+  model: Model,
+  rows: number,
+  leavers: number,
+  evidence: Record<string, Evidence>,
+): Promise<void> {
   await client.query(
-    `insert into models (model_id, feature_names, feature_mean, feature_scale, weights, bias, training_rows, training_leavers)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
+    `insert into models (model_id, feature_names, feature_mean, feature_scale, weights, bias, training_rows, training_leavers, evidence)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      on conflict (model_id) do update set trained_at = now(), feature_names = excluded.feature_names,
        feature_mean = excluded.feature_mean, feature_scale = excluded.feature_scale,
        weights = excluded.weights, bias = excluded.bias,
-       training_rows = excluded.training_rows, training_leavers = excluded.training_leavers`,
-    [modelId, FEATURE_NAMES, model.mean, model.scale, model.weights, model.bias, rows, leavers],
+       training_rows = excluded.training_rows, training_leavers = excluded.training_leavers,
+       evidence = excluded.evidence`,
+    [modelId, FEATURE_NAMES, model.mean, model.scale, model.weights, model.bias, rows, leavers, JSON.stringify(evidence)],
   );
+}
+
+interface SavedModel {
+  modelId: string;
+  /** The date it was learned as of, taken from its id. */
+  learnedOn: string;
+  model: Model;
+  evidence: Record<string, Evidence>;
+  rows: number;
+  leavers: number;
+}
+
+/** True when there is no usable saved model, or the saved one is at least maxAgeDays old. */
+export function needsRelearn(learnedOn: string | null, asOf: string, maxAgeDays = MODEL_MAX_AGE_DAYS): boolean {
+  return learnedOn === null || daysBetween(learnedOn, asOf) >= maxAgeDays;
+}
+
+/**
+ * The latest model learned on or before asOf. Skipped (so the job re-learns) when it has no
+ * stored evidence or was built for a different list of clues.
+ */
+async function loadSavedModel(client: pg.Client, asOf: string): Promise<SavedModel | null> {
+  const row = (
+    await client.query(
+      `select model_id, feature_names, feature_mean, feature_scale, weights, bias, training_rows, training_leavers, evidence
+       from models where model_id like 'logit-%' and model_id <= $1 order by model_id desc limit 1`,
+      [`logit-${asOf}`],
+    )
+  ).rows[0];
+  if (!row || !row.evidence) return null;
+  if (JSON.stringify(row.feature_names) !== JSON.stringify([...FEATURE_NAMES])) return null;
+  return {
+    modelId: row.model_id,
+    learnedOn: String(row.model_id).slice("logit-".length),
+    model: { mean: row.feature_mean.map(Number), scale: row.feature_scale.map(Number), weights: row.weights.map(Number), bias: Number(row.bias) },
+    evidence: row.evidence,
+    rows: Number(row.training_rows),
+    leavers: Number(row.training_leavers),
+  };
 }
 
 /** Stage 1 of publishing: one org's run. Writes are one transaction; a failure rolls them back. */
@@ -178,6 +231,7 @@ async function runOrg(
   modelId: string,
   asOf: string,
   forceFail: boolean,
+  evidence: Record<string, Evidence>,
 ): Promise<{ status: "succeeded" | "failed"; scored: number; unknown: number; error?: string }> {
   const run = await client.query(
     "insert into runs (org_id, as_of, model_id, status) values ($1, $2, $3, 'running') returning run_id",
@@ -186,7 +240,7 @@ async function runOrg(
   const runId = run.rows[0]?.run_id as string;
 
   try {
-    const rows = scoreOrg(org, model, asOf);
+    const rows = scoreOrg(org, model, asOf, evidence);
     const scored = rows.filter((r) => r.probability !== null).length;
     const unknown = rows.length - scored;
 
@@ -296,14 +350,24 @@ export async function runNightly(asOf: string): Promise<{ failures: number }> {
   let failures = 0;
   try {
     const orgs = await loadOrgs(client);
-    const { X, y } = trainingSet(orgs, asOf);
-    const model = fitLogistic(X, y);
-    const modelId = `logit-${asOf}`;
-    await saveModel(client, modelId, model, X.length, y.filter(Boolean).length);
-    console.log(`model ${modelId}: trained on ${X.length} renewals, ${y.filter(Boolean).length} leavers`);
+    const saved = process.env["RELEARN"] ? null : await loadSavedModel(client, asOf);
+    let model: Model;
+    let evidence: Record<string, Evidence>;
+    let modelId: string;
+    if (saved && !needsRelearn(saved.learnedOn, asOf)) {
+      ({ model, evidence, modelId } = saved);
+      console.log(`model ${modelId}: reused (learned ${daysBetween(saved.learnedOn, asOf)} days ago, re-learned every ${MODEL_MAX_AGE_DAYS} days)`);
+    } else {
+      const { X, y } = trainingSet(orgs, asOf);
+      model = fitLogistic(X, y);
+      evidence = buildEvidence(X, y);
+      modelId = `logit-${asOf}`;
+      await saveModel(client, modelId, model, X.length, y.filter(Boolean).length, evidence);
+      console.log(`model ${modelId}: re-learned from ${X.length} renewals, ${y.filter(Boolean).length} leavers`);
+    }
 
     for (const org of orgs) {
-      const result = await runOrg(client, org, model, modelId, asOf, forced === org.orgId);
+      const result = await runOrg(client, org, model, modelId, asOf, forced === org.orgId, evidence);
       if (result.status === "succeeded") {
         console.log(`  ${org.orgId}: published (${result.scored} scored, ${result.unknown} unknown)`);
       } else {

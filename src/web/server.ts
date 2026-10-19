@@ -16,6 +16,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import express from "express";
 import type pg from "pg";
 import { asUser, webPool } from "../db.js";
+import { describeRate, type Evidence } from "../evidence.js";
 import { baseRate, bandOf, type Band, CONTACT_WINDOW_DAYS, CALL_CAPACITY, splitCalls } from "../ranking.js";
 
 export interface Session {
@@ -92,6 +93,7 @@ interface Reason {
   weight: number;
   contribution: number;
   sources: { ids: string[]; count: number };
+  evidence?: Evidence;
 }
 
 const BAND_LABEL: Record<Band, string> = { red: "Red", amber: "Amber", green: "Green" };
@@ -489,7 +491,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
   table { font-size: 13px; }
 }
 </style></head><body>${nav}<main>${body}</main>
-<p class="footnote">Scores are a model's estimate from synthetic test data, not a forecast about real customers.</p>
+<p class="footnote">Scores are an estimate from generated test data, not a forecast about real customers.</p>
 </body></html>`;
 }
 
@@ -606,7 +608,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       const pctOf = (x: number): string => `${(x * 100).toFixed(2)}%`;
       return `${banner}
         <h1>Renewals to work this week</h1>
-        <p class="lede small">Scored ${esc(published.as_of)} · model ${esc(published.model_id)} · <a href="/runs">run log</a></p>
+        <p class="lede small">Scored ${esc(published.as_of)} · scoring version ${esc(published.model_id)} · <a href="/runs">run log</a></p>
         <section class="callout how">
           <h2>How this list works</h2>
           <ul>
@@ -620,7 +622,7 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           <div class="card stat"><div class="label">Renewals scored</div><div class="value">${scored.length}</div><div class="hint">Next 90 days</div></div>
           <div class="card stat"><div class="label">Not scored</div><div class="value">${unknown.length}</div><div class="hint">Shown as unknown, never as safe</div></div>
         </div>
-        <p class="small"><span class="risk red">Red</span> at least ${pctOf(2 * rate)} chance (twice the typical ${pctOf(rate)}) · <span class="risk amber">Amber</span> at least ${pctOf(rate)} · <span class="risk green">Green</span> below that. Bands are set from the model's training data and move when it is retrained.</p>
+        <p class="small"><span class="risk red">Red</span> at least ${pctOf(2 * rate)} chance (twice the typical ${pctOf(rate)}) · <span class="risk amber">Amber</span> at least ${pctOf(rate)} · <span class="risk green">Green</span> below that. Bands are set from how often past customers left, and move when the scoring is re-learned.</p>
         ${rows.length ? `<div class="search"><input id="account-search" type="search" placeholder="Search accounts" aria-label="Search accounts by name" autocomplete="off"></div>` : ""}
         <div class="section-head"><h2>This week's calls</h2><span class="muted small">Highest money at risk first</span></div>
         ${top.length ? callTable(top.map((r, i) => callRow(r, i + 1))) : "<div class='card empty'>No calls left this week. Everyone here was contacted recently, or nothing renews in the next 90 days.</div>"}
@@ -660,7 +662,12 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         .map((r) => {
           const shown = r.sources.ids.map((id) => `<code>${esc(id)}</code>`).join(", ");
           const more = r.sources.count > r.sources.ids.length ? ` and ${r.sources.count - r.sources.ids.length} more` : "";
-          return `<tr><td>${esc(r.label)}</td><td>${esc(r.value)}</td><td>${esc(r.weight)}</td><td>${esc(r.contribution)}</td>
+          const rounded = Number(Number(r.contribution).toFixed(2)); // avoids "-0.00"
+          const points = `${rounded > 0 ? "+" : ""}${rounded.toFixed(2)}`;
+          const past = r.evidence
+            ? `<strong>${esc(r.evidence.rule)}</strong><br>With it: ${esc(describeRate(r.evidence.present))}<br>Without it: ${esc(describeRate(r.evidence.absent))}`
+            : "<span class='muted'>no simple level</span>";
+          return `<tr><td>${esc(r.label)}</td><td>${esc(r.value)}</td><td>${esc(points)}</td><td class="small">${past}</td>
             <td>${r.sources.count ? `${r.sources.count} record(s): ${shown}${more}` : "<span class='muted'>none</span>"}</td></tr>`;
         })
         .join("");
@@ -673,11 +680,11 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
           <div class="card stat"><div class="label">Renewal</div><div class="value">${esc(row.renewal_date ?? "unknown")}</div><div class="hint">${row.days_to_renewal} days away</div></div>
         </div>
         <h2>Why this score</h2>
-        <p class="muted">Each reason is the model's weight for that signal times how far this account is from the average. Positive contributions push the risk up. The total is passed through a standard formula to give the chance above.</p>
-        <div class="table-wrap"><table><thead><tr><th>Signal</th><th>This account</th><th>Weight</th><th>Effect</th><th>Source records</th></tr></thead><tbody>${reasonRows}</tbody></table></div>
-        <div class="check">Check: bias ${esc(Number(model?.bias ?? 0).toFixed(4))} + sum of effects ${esc(sumContributions.toFixed(4))} → chance ${pct(recomputed)} (stored ${pct(row.probability)}).</div>
+        <p class="muted">A typical customer starts at 0 points, which is a ${pct(1 / (1 + Math.exp(-Number(model?.bias ?? 0))))} chance of leaving. Each clue adds or removes points, depending on how this account compares with a typical one. Points above 0 push the risk up. The total gives the chance above. "In past data" shows how often earlier customers left with and without the clue.</p>
+        <div class="table-wrap"><table><thead><tr><th>Clue</th><th>This account</th><th>Points</th><th>In past data</th><th>Source records</th></tr></thead><tbody>${reasonRows}</tbody></table></div>
+        <div class="check">Check: a typical customer starts at ${pct(1 / (1 + Math.exp(-Number(model?.bias ?? 0))))}. This account's points add up to ${esc(sumContributions.toFixed(2))}, which gives ${pct(recomputed)} (stored ${pct(row.probability)}).</div>
         <h2>Trace</h2>
-        <p class="muted">Run <code>${esc(published.run_id)}</code> · data as of ${esc(published.as_of)} · model <code>${esc(published.model_id)}</code> · trained ${esc(model?.trained_at ?? "")}</p>
+        <p class="muted">Run <code>${esc(published.run_id)}</code> · data as of ${esc(published.as_of)} · scoring version <code>${esc(published.model_id)}</code> · trained ${esc(model?.trained_at ?? "")}</p>
         <h2>Automatic messages</h2>
         ${reminders.length ? `<ul>${reminders.map((r: { invoice_id: string; sent_at: string }) => `<li>Card-update reminder sent ${esc(new Date(r.sent_at).toISOString().slice(0, 10))} for invoice ${esc(r.invoice_id)}</li>`).join("")}</ul>` : "<p class='muted'>None</p>"}
         <form method="post" action="/account/${esc(sfId)}/contacted"><button>I contacted this customer today</button></form>`;

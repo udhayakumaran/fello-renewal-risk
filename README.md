@@ -7,7 +7,7 @@ source records. The list is built nightly by a job that runs without anyone star
 Read `BRIEF.md` first for the problem and the disagreements with the request. This file covers what
 was built, what was decided, what was skipped, and what breaks first.
 
-Loom walkthrough: LINK_TBD
+Loom walkthrough: https://www.loom.com/share/56c146cf4a66462a94dc93407a022f5a
 
 ## Live demo
 

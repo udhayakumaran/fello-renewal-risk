@@ -5,3 +5,4 @@ data/
 .vercel
 supabase/.temp
 supabase/.branches/
+docs/private/

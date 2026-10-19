@@ -26,10 +26,11 @@ cp .env.example .env           # set SESSION_SECRET (16+ characters)
 npm run generate               # synthetic source data into data/raw (answer key in data/truth, never read by the pipeline)
 supabase migration up --local  # database schema and tenant rules
 npm run db:load                # load the source data (development reset: clears scoring tables too)
-npm run nightly                # train, score, publish for every org
+npm run nightly                # score and publish for every org (re-learns the points if the saved ones are 30+ days old)
 PORT=3000 node --env-file=.env dist/src/web/server.js   # CSM app at http://localhost:3000
-npm test                       # 21 checks, including tenant isolation, cookie expiry and traceability
+npm test                       # 30 checks (3 need CHROME_PATH), including tenant isolation, cookie expiry, traceability and the past-data evidence
 npm run evaluate               # model vs simple rule, on a held-out date
+npm run replay                 # day one vs a year later, replayed on the sample data
 npm run deck                  # build docs/renewal-risk-deck.pptx
 npm run e2e                   # 25 browser checks through the real app (Playwright; writes one test call record)
 BASE_URL=https://... node e2e/run.js --read-only   # same checks against the live site, no writes (24 checks)
@@ -48,8 +49,8 @@ To show the failure path: `FORCE_FAIL=org_b npm run nightly`. That run is logged
 | Model | Logistic regression written by hand (`src/model.ts`), so every reason is a weight times a value. Trained on past renewals only. |
 | Labels | A customer counts as leaving if they cancel, or a renewal invoice is never paid or attempted, within 90 days. A failed card is not a departure. |
 | Population | Only renewals in the next 90 days. Customers that can't be scored show as **unknown**, never as safe. |
-| Nightly job | Trains, scores every org, writes alerts and card reminders, then publishes. Each org is all-or-nothing: a failure rolls back and the last good run stays published. The run log shows every attempt. |
-| CSM app | Login (development stand-in), ranked list, top 15 as this week's calls, account page with every reason, its source records, and a check that recomputes the score. Red / amber / green bands are set from the model's training base rate (red at twice the base rate, amber at the base rate). A "contacted" button takes an account off the call list for 14 days before the top 15 is cut, so a contact frees its slot. |
+| Nightly job | Scores every org, writes alerts and card reminders, then publishes. The points per clue are re-learned every 30 days (or with `RELEARN=1`) and reused on the other nights, so a score moves because the customer changed, not because the points did. Each org is all-or-nothing: a failure rolls back and the last good run stays published. The run log shows every attempt. |
+| CSM app | Login (development stand-in), ranked list, top 15 as this week's calls, account page with every clue, the points it added or removed, how often past customers left with and without it, its source records, and a check that recomputes the score. Red / amber / green bands are set from the model's training base rate (red at twice the base rate, amber at the base rate). A "contacted" button takes an account off the call list for 14 days before the top 15 is cut, so a contact frees its slot. |
 | Tenancy | Postgres row-level security on every table, keyed to the `org_id` claim. The web app sets that claim from its own HMAC-signed, expiring session cookie; the database does not verify a token on this path. Tested through the API and in the browser. |
 
 ## Decisions and why
@@ -109,7 +110,7 @@ Roughly in the order it would bite:
 4. **Row-level security on large tables.** Policies are evaluated per row. At 10x the event table needs partitioning by org and month, and an index that matches the policy.
 5. **Nightly run: Vercel Cron, no lock, 60-second limit.** `vercel.json` calls `/api/cron/nightly` once a day at 20:30 UTC (02:00 IST), and that function is capped at 60 seconds. Overlapping runs are not prevented: a manual call during the scheduled run starts a second one. Both write their own run rows, the later publish wins, and both can insert a card reminder for the same customer because `card_reminders` has no unique key. If the 60-second limit is hit, orgs that already published keep their new run, the org in progress rolls back and its run row stays `running`, and Vercel records a timeout. Fix: a Postgres advisory lock per run, a unique key on `card_reminders`, and a queue with one job per org once a run no longer fits in 60 seconds.
 6. **Alerts accumulate.** Alerts from old runs are not closed. The page filters by the published run, but the table grows. Fix: close alerts when a run is superseded.
-7. **The model is trained on synthetic patterns.** The first real data will shift the weights. Fix: monitor the score distribution and the top-15 hit rate each week, and retrain on a schedule.
+7. **The model is trained on synthetic patterns.** The first real data will shift the weights. The points are re-learned every 30 days, but nothing yet checks that a new version is at least as good as the old one before it goes live. Fix: compare each new version with the last on a held-out date before publishing, and monitor the score distribution and the top-15 hit rate each week.
 
 ## Honest limits
 
@@ -124,7 +125,7 @@ Roughly in the order it would bite:
 - `gen/generate.ts`: synthetic data generator, with checks.
 - `src/`: matching, features, model, evaluation, nightly job, explanations, web app.
 - `supabase/migrations/`: schema, row-level security, and the scoring tables.
-- `test/`: 21 checks across the pipeline, the database rules, and the web app.
+- `test/`: 30 checks across the pipeline, the database rules, and the web app.
 - `docs/screenshots/`: what a CSM sees.
 - `docs/renewal-risk-deck.pptx`: the walkthrough deck (built by `npm run deck`).
 

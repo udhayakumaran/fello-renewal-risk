@@ -1,137 +1,98 @@
 # Data Plan: Renewal Risk Call List
 
-**Purpose:** Defines what data we store, how records link to one customer, and the rules for when each piece of data may be used. Written before any code, so it can be checked first.
+**Purpose:** What data we store, how records link to one customer, and the rules for when each piece of data may be used. Written before the code and updated to match what was built. Where something is computed in code each run rather than stored, it says so.
 
-**Plain-English summary:** Five raw data sources come in. Each record is linked to one customer. For each customer on each date, we build a summary using only what the system knew on that date. A fitted model scores that summary. Every score can be traced back to the records behind it.
+**Plain-English summary:** Five raw sources come in. Each record is linked to one customer. For each customer on each date, we build a summary using only what the system knew on that date. A fitted model scores that summary. Every score can be traced back to the records behind it.
 
 ## 1. Rules that apply everywhere
 
 1. **Every table has `org_id`.** Each customer company (tenant) only sees its own rows. This is enforced in the database, not only in the app.
-2. **Raw data is never edited or deleted.** Corrections are new rows. This lets us rebuild any past score exactly.
-3. **Two timestamps on every event:**
-   - `event_time`: when it happened (for example, the ticket was opened).
-   - `ingested_at`: when our system received it.
-   Late or out-of-order data is normal. Features use `ingested_at <= as_of_date`, so a score never uses information the system didn't have on that date.
-4. **Unmatched records are kept.** They go to a review queue. They are never dropped.
+2. **Raw data is never edited or deleted.** This lets us rebuild any past score exactly.
+3. **Two timestamps on events:** `event_time` (when it happened) and `ingested_at` (when our system received it). Late and out-of-order data is normal. Features use only rows with `ingested_at` on or before the scoring date, so a score never uses information the system did not have then.
+4. **Unmatched records are kept.** They stay in the raw tables, are counted per source and reported by `npm run evaluate`. They are never dropped, but they are not attached to any customer.
 
 ## 2. Raw sources (as received, messy on purpose)
 
 | Table | Source | Key columns | Notes |
 |---|---|---|---|
-| `sf_accounts` | Salesforce | `sf_id`, `company_name`, `email_domain`, `owner_csm_id`, `contract_value`, `renewal_date`, `billing_cycle` (monthly / annual / multi-year) | Can contain duplicate accounts and missing renewal dates |
+| `sf_accounts` | Salesforce | `sf_id`, `company_name`, `email_domain`, `owner_csm_id`, `contract_value`, `renewal_date`, `billing_cycle` | Duplicate accounts and missing renewal dates |
 | `sf_contacts` | Salesforce | `sf_contact_id`, `sf_id`, `email`, `role`, `is_active` | Role may be blank or out of date |
-| `zd_tickets` | Zendesk | `ticket_id`, `org_ref`, `opened_at`, `closed_at`, `reopen_count`, `priority`, `ingested_at` | `closed_at` can be missing or earlier than `opened_at` (data error) |
-| `product_events` | Product | `event_id`, `account_ref`, `user_id`, `event_type`, `event_time`, `ingested_at` | Largest table (most of the 200,000 events). Can arrive days late |
-| `stripe_invoices` | Stripe | `invoice_id`, `customer_ref`, `amount`, `due_date`, `status` (paid / open / failed / void), `attempt_count`, `sent_at`, `viewed_at` | `viewed_at` only exists if the customer opened the invoice |
-| `stripe_subscription_events` | Stripe | `event_id`, `customer_ref`, `event_type` (cancel_at_renewal / cancelled / downgraded / upgraded / reactivated), `event_time` | The clearest churn signals |
-| `gmail_meta` | Gmail | not loaded in v1 | Parked. Metadata only if added later |
+| `zd_tickets` | Zendesk | `ticket_id`, `org_ref`, `opened_at`, `closed_at`, `reopen_count`, `priority`, `ingested_at` | `closed_at` missing, or earlier than `opened_at` |
+| `product_events` | Product | `event_id`, `account_ref`, `user_id`, `event_type`, `event_time`, `ingested_at` | Largest table. Can arrive days late, and be replayed |
+| `stripe_invoices` | Stripe | `invoice_id`, `customer_ref`, `amount`, `due_date`, `status`, `attempt_count`, `sent_at`, `viewed_at` | `viewed_at` only if the customer opened it |
+| `stripe_subscription_events` | Stripe | `event_id`, `customer_ref`, `event_type` (cancel_at_renewal, cancelled, downgraded, upgraded, reactivated), `event_time` | The clearest churn signals |
+| `gmail_messages` | Gmail | `message_id`, `contact_id`, `counterpart_domain`, `direction`, `sent_at`, `reply_latency_hours` | Metadata only, no message content. Generated and loaded, but **not used in the score**. Using it needs the business to confirm the legal basis |
 
-**Messiness we will generate:** duplicate rows, different ID formats per source, missing fields, timestamps arriving late, accounts with almost no events, accounts that exist in one source only, and a few impossible values (for example, close before open).
+**Messiness generated:** duplicate rows, different ID formats per source, missing fields, late and replayed events, accounts with almost no events, records that exist in one source only, personal email addresses, and a few impossible values (for example, close before open).
 
-## 3. Linking records to one customer
+## 3. Linking records to one customer (computed in code, not stored)
 
-**Table: `identity_map`**
-- `org_id`, `source`, `source_ref`, `customer_id`, `match_method`, `confidence`, `matched_at`
+Matching order: (1) exact match on a shared ID, if one appears; (2) email domain from Salesforce contacts; (3) normalised company name, only when exactly one customer has that name. Anything else is counted as unmatched for that source. A low match rate is a finding, not a silent failure.
 
-**Matching order:**
-1. Exact match on a known shared ID (none expected in v1, but handled if it appears).
-2. Email domain match from Salesforce contacts.
-3. Normalized company name match (lowercase, punctuation and suffixes like "Ltd" removed).
-4. Anything else goes to `review_queue`, with the reason.
-
-**Table: `review_queue`**
-- `org_id`, `source`, `source_ref`, `reason`, `status` (open / resolved), `created_at`
-
-**Measure we report:** match rate per source, and how many records are in the queue. A low match rate is a finding, not a silent failure.
+Duplicate CRM records are collapsed to one customer, keeping the latest renewal date.
 
 ## 4. Customer-level facts
 
-**Table: `customers`**
-- `customer_id`, `org_id`, `sf_id`, `company_name`, `owner_csm_id`, `contract_value`, `renewal_date`, `billing_cycle`, `data_quality_flags`
+Built from `sf_accounts` each run. If the CRM `renewal_date` is missing, the customer is shown as **not scored** with the reason, never as safe.
 
-**Rule:** if `renewal_date` is missing, the customer is shown as **unknown**, never as safe. The reason is stored in `data_quality_flags`.
+## 5. Renewal outcomes (training labels, computed in code)
 
-## 5. Renewal outcomes (training labels)
+**Observed outcome (what training and evaluation use):** left = a cancellation, or a renewal invoice never paid or attempted, dated within the 90 days after the scoring date and received by the time the model is trained. This is what a real team could observe. A failed card is treated as a support case, not a departure. A downgrade is a warning signal, not "left".
 
-**Table: `renewal_outcomes`**
-- `customer_id`, `renewal_date`, `outcome` (renewed / left), `left_on`, `returned_on` (nullable)
+The generator's answer key (`data/truth`) is used only to check the label, never by the pipeline. In the current test, the label disagrees with it for 21 of 1,640 customers, because some real departures look like card failures.
 
-**Definition (agreed):**
-- **Left** = the customer cancels before or at renewal, or cancels mid-contract.
-- **Downgrade is not "left."** It is tracked as a separate warning signal.
-- **Returned within a few months still counts as left.** The label is set at the first cancel.
+**Training rows:** one row per customer per past scoring date, only where the next renewal is within 90 days. A customer whose renewal is further away is not yet a negative example.
 
-**Training rows:** one row per (customer, as-of date) where the renewal date falls within the next 90 days. A customer whose renewal is further away is not a negative example yet.
+**Silent leavers:** about half of generated leavers show no warning signs. We expect this in real life too, and the model cannot catch them.
 
-**Observed outcome (what training and evaluation use):** left = a cancellation, or a renewal invoice still unpaid, dated within the 90 days after the as-of date. This is what a real team could observe. The answer key is only used to check it (6 disagreements in 1,609 customers in the current test).
+## 6. What the model sees (computed in code, not stored)
 
-**Silent leavers:** some customers leave with no warning signs. We expect this in real life too, and the model cannot catch them. Their share is a stated assumption (half of leavers in the generator).
+**11 inputs per customer, per scoring date:**
+- **Usage:** product events in the last 90 days, in the 90 days before that, the drop between them, and the log ratio.
+- **Support:** tickets still open on the date, tickets opened in the last 90 days.
+- **Subscription:** cancel-at-renewal warnings and downgrades in the last 120 days.
+- **Account:** time as a customer, log of contract value.
+- **Contacts:** share of contacts marked inactive.
 
-## 6. Feature snapshots (what the model sees)
+**Population:** only customers with a renewal in the next 90 days are scored (the renewal date comes from the contract schedule, not the CRM field). Days until renewal is not an input: it only sets the population, because scoring everyone would let "renewal soon" alone predict the label.
 
-**Table: `feature_snapshots`**
-- `snapshot_id`, `org_id`, `customer_id`, `as_of_date`, `features` (JSON), `computed_at`
+**Not scored (shown as not scored, with the reason):** no renewal date in the CRM; already cancelled on or before the date; or a renewal invoice was sent but never attempted, so the outcome is unclear. A failed card is not one of these: that customer is scored and gets the card reminder.
 
-**Feature list (first version, 13 features):**
-- **Usage:** events in the last 90 days, events in the 90 days before that, the drop between them, and the log ratio. Compared with that customer's own past, not other customers.
-- **Support:** open tickets as of the date, tickets opened in the last 90 days.
-- **Subscription:** cancel-at-renewal warning and downgrades in the last 120 days.
-- **Account:** days to renewal (from the contract schedule, not the CRM field), renewal-date missing flag, tenure, log contract value.
-- **Contacts:** share of contacts marked inactive (a noisy proxy for a champion leaving).
+## 7. Stored output
 
-**Population:** only customers with a renewal in the next 90 days are scored. This is the list the CSM works from. Scoring everyone would let "renewal soon" alone predict the label.
+| Table | Holds |
+|---|---|
+| `models` | One row per learned model, `logit-<date>`: the points per clue, the typical value of each input, how many cases it learned from, and what past customers did with and without each clue. Re-learned every 30 days, reused in between |
+| `runs` | Every nightly attempt per org: status (running, succeeded, failed), error, scored and not-scored counts |
+| `scores` | One row per customer per run: chance of leaving, money at risk, not-scored reason, and the reasons (clue, value, points, source record IDs) |
+| `published_runs` | Which run each org's CSMs see. Only a succeeded run is published, so a failed run is logged and never shown |
 
-**Excluded from scoring (shown as unknown):** customers with a cancellation on or before the as-of date, or a renewal invoice sent on or before it that is still unpaid. Their state is unclear, so they are not scored as safe.
-
-**Dropped:** an unpaid-invoice feature. It was always zero, because accounts with unpaid invoices are excluded before scoring.
-
-**Rule:** a feature is computed only from records with `ingested_at <= as_of_date` (invoices use `sent_at`, since they have no ingestion time).
-
-## 7. Scores and traceability
-
-**Table: `scores`**
-- `score_id`, `org_id`, `customer_id`, `as_of_date`, `run_id`, `model_version`, `probability`, `reasons` (JSON: each reason, its value, its weight, and its source record IDs), `snapshot_id`
-
-**Model version:** a stored file with its training date, data range, and a fixed random seed. The same snapshot and model version always produce the same score.
-
-**Table: `runs`**
-- `run_id`, `org_id`, `started_at`, `finished_at`, `status` (running / succeeded / failed), `error`, `row_counts` (JSON)
-
-**Publish rule:** the list the CSM sees points to the last successful run only. A failed run is logged and never shown. Stored in `published_runs` (`org_id`, `run_id`, `published_at`).
+**Determinism:** training starts from zero with a fixed number of steps and no randomness, so the same data and model version always give the same score. A test rebuilds every stored score from its stored reasons.
 
 ## 8. Actions and outreach
 
-**Table: `alerts`**
-- `alert_id`, `org_id`, `customer_id`, `run_id`, `alert_type` (csm_review / payment_issue), `status` (open / handled / suppressed), `suppressed_reason`
+| Table | Holds |
+|---|---|
+| `alerts` | `csm_review` and `card_failed` alerts, with status (open, handled, suppressed) and a reason |
+| `card_reminders` | Card-update reminders. The send step is a stub: it writes a row, it does not send email |
+| `opt_outs` | Customers who must not get customer email |
+| `csm_actions` | Calls the CSM logged. Kept from day one so a later version can measure whether calls help |
 
-**Table: `card_reminders`**
-- `org_id`, `customer_id`, `invoice_id`, `sent_at`
-
-**Table: `opt_outs`**
-- `org_id`, `customer_id`, `set_at`, `source`
-
-**Suppression rules (in order):**
-1. Customer has opted out of messages → no customer email. Alert only.
-2. A CSM contacted the customer in the last 14 days → alert is marked "already handled." It is still shown, but grayed out.
-3. A card reminder was sent in the last 14 days → no second reminder.
-
-**Table: `csm_actions`**
-- `org_id`, `customer_id`, `csm_id`, `action_date`, `action_type`
-Stored from day one, so a later version can measure whether calls help.
+**Suppression rules, in order:** (1) opted-out customer: no customer email, alert only; (2) a CSM contacted the customer in the last 14 days: the alert is held back; (3) a card reminder in the last 14 days: no second reminder.
 
 ## 9. Open items this plan depends on
 
-| Item | Assumption in this plan | Check when |
+| Item | Assumption | Check when |
 |---|---|---|
-| Opt-out setting | Exists somewhere; we model it as `opt_outs` | Before any customer email is sent |
-| Contact roles | Present but may be stale; used only for the alert text in v1 | Once real data is seen |
-| Gmail | Not loaded | v2 |
-| Renewal dates | Mostly present | Measured in the generated data (percent missing) |
-| Past call history | About 3 years, as stated in the request, with gaps. Most recent year weighted most in evaluation | Measured in the generated data (percent missing per year) |
+| Opt-out setting | Exists somewhere; modelled as `opt_outs` | Before any customer email is sent |
+| Contact roles | Present but may be stale | Once real data is seen |
+| Gmail | Loaded, not scored | When the legal basis is confirmed |
+| Renewal dates | Mostly present | Measured in the generated data |
+| Past call history | About three years, with gaps | Measured in the generated data |
 
 ## 10. What this plan does not cover
 
-- Connections to real Salesforce, Zendesk, or Stripe (we use generated files).
+- Connections to real Salesforce, Zendesk, Stripe or Gmail (we use generated files).
 - Authentication beyond a demo login.
 - Per-customer-type models.
-- Anything about Gmail.
+- Real email sending.

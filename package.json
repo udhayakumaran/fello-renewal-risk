@@ -13,7 +13,8 @@
     "nightly": "tsc && node --env-file-if-exists=.env dist/src/pipeline/nightly.js",
     "deck": "tsc && node dist/deck/build-deck.js",
     "web": "tsc && node --env-file-if-exists=.env dist/src/web/server.js",
-    "e2e": "node e2e/run.js"
+    "e2e": "node e2e/run.js",
+    "replay": "tsc && node dist/src/replay.js"
   },
   "keywords": [],
   "author": "",

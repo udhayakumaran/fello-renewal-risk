@@ -11,6 +11,8 @@ export interface SourceIndex {
   contacts: Map<string, CsvRow[]>;
   /** Rows that could not be linked to one customer. These go to the review queue, never dropped. */
   unmatched: Record<string, number>;
+  /** The same rows, one entry each, for the review queue: which record and what we tried to match on. */
+  unmatchedRows: { source: string; recordId: string; hint: string }[];
 }
 
 function add(map: Map<string, CsvRow[]>, id: string, row: CsvRow): void {
@@ -25,12 +27,17 @@ export function indexSources(data: RawData, identity: Identity): SourceIndex {
     subs: new Map(),
     contacts: new Map(),
     unmatched: { events: 0, tickets: 0, invoices: 0, subs: 0, contacts: 0 },
+    unmatchedRows: [],
+  };
+  const miss = (source: string, recordId: string | undefined, hint: string | undefined): void => {
+    index.unmatched[source] = (index.unmatched[source] ?? 0) + 1;
+    index.unmatchedRows.push({ source, recordId: recordId ?? "", hint: hint ?? "" });
   };
 
   for (const row of data.events) {
     const id = resolveByDomain(identity, row["account_domain"] ?? "");
     if (id) add(index.events, id, row);
-    else index.unmatched["events"] = (index.unmatched["events"] ?? 0) + 1;
+    else miss("events", row["event_id"], row["account_domain"]);
   }
 
   for (const row of data.tickets) {
@@ -38,7 +45,7 @@ export function indexSources(data: RawData, identity: Identity): SourceIndex {
       resolveByDomain(identity, domainOf(row["requester_email"] ?? "")) ??
       resolveByName(identity, row["org_name"] ?? "");
     if (id) add(index.tickets, id, row);
-    else index.unmatched["tickets"] = (index.unmatched["tickets"] ?? 0) + 1;
+    else miss("tickets", row["ticket_id"], row["requester_email"] || row["org_name"]);
   }
 
   // Stripe rows link to a customer through the billing email. Stripe's own customer id is
@@ -50,19 +57,19 @@ export function indexSources(data: RawData, identity: Identity): SourceIndex {
       add(index.invoices, id, row);
       refToSf.set(row["customer_ref"] ?? "", id);
     } else {
-      index.unmatched["invoices"] = (index.unmatched["invoices"] ?? 0) + 1;
+      miss("invoices", row["invoice_id"], row["billing_email"]);
     }
   }
   for (const row of data.subs) {
     const id = refToSf.get(row["customer_ref"] ?? "");
     if (id) add(index.subs, id, row);
-    else index.unmatched["subs"] = (index.unmatched["subs"] ?? 0) + 1;
+    else miss("subs", row["event_id"], row["customer_ref"]);
   }
 
   for (const row of data.contacts) {
     const id = resolveByDomain(identity, domainOf(row["email"] ?? ""));
     if (id) add(index.contacts, id, row);
-    else index.unmatched["contacts"] = (index.unmatched["contacts"] ?? 0) + 1;
+    else miss("contacts", row["contact_id"], row["email"]);
   }
 
   return index;

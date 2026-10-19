@@ -348,6 +348,7 @@ function page(title: string, body: string, session: Session | null): string {
         <a class="brand" href="/">Renewal risk</a>
         <nav>
           <a href="/">This week</a>
+          <a href="/unmatched">Unmatched</a>
           <a href="/runs">Run log</a>
         </nav>
         <div class="who">
@@ -652,7 +653,13 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
       const model = (await c.query("select * from models where model_id = $1", [published.model_id])).rows[0];
       const accountRate = baseRate(Number(model?.training_leavers ?? 0), Number(model?.training_rows ?? 0));
       const reminders = (await c.query("select invoice_id, sent_at from card_reminders where sf_id = $1 order by sent_at desc limit 5", [sfId])).rows;
-      const contacted = (await c.query("select action_date from csm_actions where sf_id = $1 order by action_date desc limit 1", [sfId])).rows[0];
+      const contacted = (
+        await c.query(
+          `select action_date::text as action_date, (action_date > current_date - $2::int) as recent, (action_date + $2::int)::text as back_on
+           from csm_actions where sf_id = $1 order by action_date desc limit 1`,
+          [sfId, CONTACT_WINDOW_DAYS],
+        )
+      ).rows[0];
 
       const reasons = row.reasons as Reason[];
       const sumContributions = reasons.reduce((s, r) => s + Number(r.contribution), 0);
@@ -687,7 +694,11 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         <p class="muted">Run <code>${esc(published.run_id)}</code> · data as of ${esc(published.as_of)} · scoring version <code>${esc(published.model_id)}</code> · trained ${esc(model?.trained_at ?? "")}</p>
         <h2>Automatic messages</h2>
         ${reminders.length ? `<ul>${reminders.map((r: { invoice_id: string; sent_at: string }) => `<li>Card-update reminder sent ${esc(new Date(r.sent_at).toISOString().slice(0, 10))} for invoice ${esc(r.invoice_id)}</li>`).join("")}</ul>` : "<p class='muted'>None</p>"}
-        <form method="post" action="/account/${esc(sfId)}/contacted"><button>I contacted this customer today</button></form>`;
+        ${
+          contacted?.recent
+            ? `<p class="muted">Contacted on ${esc(contacted.action_date)}. This account is off this week's calls until ${esc(contacted.back_on)}.</p>`
+            : `<form method="post" action="/account/${esc(sfId)}/contacted"><button>I contacted this customer today</button></form>`
+        }`;
     });
     if (html === null) {
       res.status(404).type("html").send(page("Not found", "<h1>Not found</h1><p class='muted'>This account is not in your current published list.</p>", sessionOf(res)));
@@ -702,9 +713,12 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
     await withSession(pool, session, async (c) => {
       const owned = (await c.query("select 1 from sf_accounts where sf_id = $1 and owner_csm_id = $2", [sfId, session.csm])).rowCount;
       if (!owned) return;
+      // A second click inside the window changes nothing, so one call is never recorded twice.
       await c.query(
-        "insert into csm_actions (org_id, sf_id, csm_id, action_date, action_type) values ((auth.jwt() ->> 'org_id'), $1, $2, current_date, 'call')",
-        [sfId, session.csm],
+        `insert into csm_actions (org_id, sf_id, csm_id, action_date, action_type)
+         select (auth.jwt() ->> 'org_id'), $1::text, $2::text, current_date, 'call'
+         where not exists (select 1 from csm_actions where sf_id = $1::text and action_date > current_date - $3::int)`,
+        [sfId, session.csm, CONTACT_WINDOW_DAYS],
       );
     });
     res.redirect(`/account/${encodeURIComponent(sfId)}`);
@@ -730,6 +744,27 @@ export function buildApp(pool: pg.Pool, secret: string, demoAccessCode: string |
         </tbody></table></div>`;
     });
     res.type("html").send(page("Run log", html, session));
+  });
+
+  router.get("/unmatched", requireSession, async (_req, res) => {
+    const session = sessionOf(res);
+    const html = await withSession(pool, session, async (c) => {
+      const counts = (await c.query("select source, count(*)::int as n, max(seen_on)::text as seen_on from unmatched_records group by source order by source")).rows as { source: string; n: number; seen_on: string }[];
+      const sample = (await c.query(
+        `select source, record_id, hint from (
+           select source, record_id, hint, row_number() over (partition by source order by id) as rn from unmatched_records
+         ) t where rn <= 25 order by source, rn`,
+      )).rows as { source: string; record_id: string; hint: string }[];
+      const label: Record<string, string> = { events: "Product events", tickets: "Zendesk tickets", invoices: "Stripe invoices", subs: "Stripe subscription events", contacts: "Salesforce contacts" };
+      const total = counts.reduce((sum, r) => sum + r.n, 0);
+      return `<h1>Unmatched records</h1>
+        <p class="lede small">Records we could not link to exactly one customer. They are kept, not scored, and rebuilt every night, so a record leaves this list once it matches. Fix: add the missing email domain or company name in the CRM. ${total} in total. First 25 per source shown.</p>
+        ${counts.length === 0 ? "<p class=\"muted\">Nothing unmatched.</p>" : counts.map((r) => `<h2>${esc(label[r.source] ?? r.source)} <small class="muted">${esc(r.n)} unmatched</small></h2>
+        <div class="table-wrap"><table><thead><tr><th>Record</th><th>We tried to match on</th></tr></thead><tbody>
+        ${sample.filter((s) => s.source === r.source).map((s) => `<tr><td>${esc(s.record_id)}</td><td>${esc(s.hint || "(blank)")}</td></tr>`).join("")}
+        </tbody></table></div>`).join("")}`;
+    });
+    res.type("html").send(page("Unmatched records", html, session));
   });
 
   app.use(router);

@@ -44,7 +44,7 @@ To show the failure path: `FORCE_FAIL=org_b npm run nightly`. That run is logged
 | Part | What it does |
 |---|---|
 | Synthetic data | 5,000 customers in 4 orgs, three years of history. Five sources (Salesforce, Zendesk, product events, Stripe, Gmail metadata), about 201,000 event rows. Messy on purpose: out-of-order arrival, replayed events, duplicate CRM records, missing renewal dates, impossible dates, personal email addresses, customers with almost no activity. |
-| Matching | Email domain first, then company name, and only when exactly one customer has that name. Unmatched records go to a review count, never dropped. |
+| Matching | Email domain first, then company name, and only when exactly one customer has that name. Unmatched records go to a review queue (the Unmatched page, rebuilt nightly), never dropped. |
 | As-of features | 11 inputs per customer, computed only from records the system had received by the scoring date. A test proves a late-arriving event is ignored. |
 | Model | Logistic regression written by hand (`src/model.ts`), so every reason is a weight times a value. Trained on past renewals only. |
 | Labels | A customer counts as leaving if they cancel, or a renewal invoice is never paid or attempted, within 90 days. A failed card is not a departure. |

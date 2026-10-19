@@ -146,3 +146,35 @@ test("a second run on the same day reuses the saved points instead of re-learnin
   const after = (await owner.query("select model_id, trained_at from models where model_id = $1", [`logit-${asOf}`])).rows[0];
   assert.equal(String(after.trained_at), String(before.trained_at), "model must not be re-learned the same day");
 });
+
+test("after \"I contacted this customer\" the button is replaced by a note, and a second click records nothing", { skip }, async () => {
+  const published = (await owner.query("select run_id from published_runs where org_id = 'org_a'")).rows[0];
+  const row = (await owner.query("select sf_id, owner_csm_id from scores where run_id = $1 and probability is not null limit 1", [published.run_id])).rows[0];
+  const cookie = cookieFor("org_a", row.owner_csm_id);
+  const post = (): Promise<Response> => fetch(`${base}/account/${row.sf_id}/contacted`, { method: "POST", redirect: "manual", headers: { cookie } });
+  const count = async (): Promise<number> => Number((await owner.query("select count(*) from csm_actions where sf_id = $1", [row.sf_id])).rows[0].count);
+  await owner.query("delete from csm_actions where sf_id = $1", [row.sf_id]);
+  try {
+    assert.match((await get(`/account/${row.sf_id}`, cookie)).body, /I contacted this customer today/);
+    await post();
+    await post();
+    assert.equal(await count(), 1, "a second click must not add a second record");
+    const after = (await get(`/account/${row.sf_id}`, cookie)).body;
+    assert.doesNotMatch(after, /I contacted this customer today/);
+    assert.match(after, /Contacted on \d{4}-\d{2}-\d{2}\. This account is off this week's calls until/);
+  } finally {
+    await owner.query("delete from csm_actions where sf_id = $1", [row.sf_id]);
+  }
+});
+
+test("unmatched records are queued per org and shown on their own page", { skip }, async () => {
+  const mine = Number((await owner.query("select count(*) from unmatched_records where org_id = 'org_a'")).rows[0].count);
+  const others = Number((await owner.query("select count(*) from unmatched_records where org_id <> 'org_a'")).rows[0].count);
+  assert.ok(mine > 0, "the nightly run queued org_a's unmatched records");
+  assert.ok(others > 0, "other orgs have their own queue");
+  const csm = (await owner.query("select owner_csm_id from sf_accounts where org_id = 'org_a' and owner_csm_id <> '' limit 1")).rows[0].owner_csm_id;
+  const response = await get("/unmatched", cookieFor("org_a", csm));
+  assert.equal(response.status, 200);
+  assert.match(response.body, /Unmatched records/);
+  assert.match(response.body, new RegExp(`${mine} in total`), "the page counts only this org's rows");
+});

@@ -9,7 +9,7 @@
 1. **Every table has `org_id`.** Each customer company (tenant) only sees its own rows. This is enforced in the database, not only in the app.
 2. **Raw data is never edited or deleted.** This lets us rebuild any past score exactly.
 3. **Two timestamps on events:** `event_time` (when it happened) and `ingested_at` (when our system received it). Late and out-of-order data is normal. Features use only rows with `ingested_at` on or before the scoring date, so a score never uses information the system did not have then.
-4. **Unmatched records are kept.** They stay in the raw tables, are counted per source and reported by `npm run evaluate`. They are never dropped, but they are not attached to any customer.
+4. **Unmatched records are kept.** They stay in the raw tables and go to a review queue (`unmatched_records`, rebuilt every night, shown on the Unmatched page and counted by `npm run evaluate`). They are never dropped, but they are not attached to any customer.
 
 ## 2. Raw sources (as received, messy on purpose)
 
@@ -65,6 +65,7 @@ The generator's answer key (`data/truth`) is used only to check the label, never
 | `models` | One row per learned model, `logit-<date>`: the points per clue, the typical value of each input, how many cases it learned from, and what past customers did with and without each clue. Re-learned every 30 days, reused in between |
 | `runs` | Every nightly attempt per org: status (running, succeeded, failed), error, scored and not-scored counts |
 | `scores` | One row per customer per run: chance of leaving, money at risk, not-scored reason, and the reasons (clue, value, points, source record IDs) |
+| `unmatched_records` | The review queue: source records not linked to exactly one customer, with what we tried to match on. Rebuilt each night, so a record leaves once it matches |
 | `published_runs` | Which run each org's CSMs see. Only a succeeded run is published, so a failed run is logged and never shown |
 
 **Determinism:** training starts from zero with a fixed number of steps and no randomness, so the same data and model version always give the same score. A test rebuilds every stored score from its stored reasons.

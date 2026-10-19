@@ -254,6 +254,7 @@ async function runOrg(
         r.probability, r.moneyAtRisk, r.unknownReason, JSON.stringify(r.reasons)]),
     );
 
+    await writeUnmatchedQueue(client, org, asOf);
     await writeAlerts(client, org.orgId, runId, rows, asOf);
     await writeCardReminders(client, org, asOf);
 
@@ -276,6 +277,17 @@ async function runOrg(
     await client.query("update runs set status = 'failed', finished_at = now(), error = $2 where run_id = $1", [runId, message]);
     return { status: "failed", scored: 0, unknown: 0, error: message };
   }
+}
+
+/** Replaces the org's review queue with tonight's unmatched records, so matched ones drop out. */
+async function writeUnmatchedQueue(client: pg.Client, org: OrgData, asOf: string): Promise<void> {
+  await client.query("delete from unmatched_records where org_id = $1", [org.orgId]);
+  await insertMany(
+    client,
+    "unmatched_records",
+    ["org_id", "source", "record_id", "hint", "seen_on"],
+    org.idx.unmatchedRows.map((r) => [org.orgId, r.source, r.recordId, r.hint, asOf]),
+  );
 }
 
 /**
